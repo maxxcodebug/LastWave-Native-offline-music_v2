@@ -1,0 +1,57 @@
+name: Offline build (debug APK)
+
+on:
+  push:
+    branches: [ offline-player, main ]
+  workflow_dispatch:
+
+concurrency:
+  group: offline-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" -Dorg.gradle.daemon=false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install SDK platform + CMake (compileSdk 37, CMake 3.22.1)
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "cmake;3.22.1" "platforms;android-37" || sdkmanager --install "cmake;3.22.1"
+          sdkmanager --list_installed | head -30
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug --stacktrace --no-daemon 2>&1 | tee build_output.txt
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LastWave-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build_output.txt
