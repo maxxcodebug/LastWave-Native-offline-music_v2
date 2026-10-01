@@ -30,6 +30,7 @@ class AuthViewModel @Inject constructor(
     private val authCallback: LastFmAuthCallbackCoordinator,
     private val backupRepository: BackupRepository,
     private val sessionPreferences: com.lastwave.app.data.local.SessionPreferences,
+    private val offlinePreferences: com.lastwave.app.data.offline.OfflinePreferences,
 ) : ViewModel() {
 
     val authState: StateFlow<AuthState> = authRepository.authState
@@ -202,6 +203,13 @@ class AuthViewModel @Inject constructor(
     fun continueAsGuest() {
         viewModelScope.launch {
             runCatching { sessionPreferences.enterGuestMode() }
+        }
+    }
+
+    /** Setup-screen offline switch: persists offline mode; LaunchGate then enters the app. */
+    fun continueOffline() {
+        viewModelScope.launch {
+            runCatching { offlinePreferences.setOfflineMode(true) }
         }
     }
 

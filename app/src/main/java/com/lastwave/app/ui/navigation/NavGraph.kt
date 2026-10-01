@@ -76,6 +76,7 @@ class LaunchGateViewModel @Inject constructor(
     authRepository: com.lastwave.app.data.repository.AuthRepository,
     sessionPreferences: com.lastwave.app.data.local.SessionPreferences,
     ytAuthManager: com.lastwave.app.data.ytmusic.YtMusicAuthManager,
+    offlinePreferences: com.lastwave.app.data.offline.OfflinePreferences,
 ) : ViewModel() {
     sealed interface GateTarget {
         data object Loading : GateTarget
@@ -89,11 +90,14 @@ class LaunchGateViewModel @Inject constructor(
             sessionPreferences.session,
             sessionPreferences.guestMode,
             ytAuthManager.connection,
-        ) { authState, session, guestMode, ytConnection ->
+            offlinePreferences.offlineMode,
+        ) { authState, session, guestMode, ytConnection, offlineMode ->
             // Wait for DataStore to load before deciding; otherwise every
             // cold start would flash Login.
-            if (!session.isLoaded) {
+            if (!session.isLoaded || offlineMode == null) {
                 GateTarget.Loading
+            } else if (offlineMode == true) {
+                GateTarget.MainShell
             } else if (authState is AuthState.Unknown) {
                 GateTarget.Loading
             } else if (authState is AuthState.SignedIn) {
@@ -238,6 +242,7 @@ fun LastWaveNavHost(
                     authViewModel.continueAsGuest()
                 },
                 onRestoreBackupAndSignIn = authViewModel::restoreBackupOnly,
+                onContinueOffline = authViewModel::continueOffline,
                 onDismissError = authViewModel::dismissError,
                 errorMessage = restoreError,
                 isBusy = restoring,
@@ -280,7 +285,31 @@ fun LastWaveNavHost(
                 onOpenDownloads = {
                     navController.navigate(Screen.Downloads.route)
                 },
+                onOpenOfflineArtist = { artist, album ->
+                    navController.navigate(Screen.OfflineArtist.createRoute(artist, album))
+                },
             )
+        }
+
+        composable(
+            route = Screen.OfflineArtist.route,
+            arguments = listOf(
+                androidx.navigation.navArgument("artistName") { type = androidx.navigation.NavType.StringType },
+                androidx.navigation.navArgument("album") {
+                    type = androidx.navigation.NavType.StringType
+                    defaultValue = ""
+                },
+            ),
+        ) { backStackEntry ->
+            val artist = backStackEntry.arguments?.getString("artistName").orEmpty()
+            val album = backStackEntry.arguments?.getString("album")?.takeIf(String::isNotBlank)
+            PredictiveBackScreen(onBack = { navController.popBackStack() }) {
+                com.lastwave.app.ui.offline.OfflineArtistScreen(
+                    artistName = artist,
+                    albumTitle = album,
+                    onBack = { navController.popBackStack() },
+                )
+            }
         }
 
         composable(Screen.Create.route) {

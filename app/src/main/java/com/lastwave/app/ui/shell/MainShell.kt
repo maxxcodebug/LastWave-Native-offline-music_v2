@@ -113,6 +113,11 @@ import com.lastwave.app.ui.feed.FeedScreen
 import com.lastwave.app.ui.home.HomeScreen
 import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
 import com.lastwave.app.ui.playlist.PlaylistScreen
+import com.lastwave.app.ui.offline.OfflineScreen
+import com.lastwave.app.ui.common.MaxxSpring
+import com.lastwave.app.ui.common.maxxPress
+import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.runtime.key
 import androidx.compose.foundation.shape.CornerBasedShape
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
@@ -139,8 +144,10 @@ import javax.inject.Inject
 @HiltViewModel
 class MainShellViewModel @Inject constructor(
     val appUpdateManager: com.lastwave.app.data.update.AppUpdateManager,
+    offlinePreferences: com.lastwave.app.data.offline.OfflinePreferences,
 ) : ViewModel() {
     val updateInfo = appUpdateManager.updateInfo
+    val offlineMode = offlinePreferences.offlineMode
 
     fun dismissUpdate(version: String) {
         appUpdateManager.dismissUpdate(version)
@@ -155,6 +162,7 @@ private enum class MainTab(val labelRes: Int) {
     FEED(com.lastwave.app.R.string.nav_feed),
     STATS(com.lastwave.app.R.string.nav_stats),
     PLAYLISTS(com.lastwave.app.R.string.nav_playlists),
+    OFFLINE(com.lastwave.app.R.string.nav_offline),
 }
 
 /** Shared with any screen hosted inside [MainShell] so their scrolling
@@ -181,7 +189,7 @@ object FloatingNavDefaults {
 private val DockShape: CornerBasedShape = RoundedCornerShape(32.dp)
 private val PillShape: Shape = CircleShape
 
-private fun <T> navSpring() = ExpressiveMotion.spatialSpring<T>()
+private fun <T> navSpring() = MaxxSpring.bouncy<T>()
 
 @Composable
 fun MainShell(
@@ -196,9 +204,53 @@ fun MainShell(
     onOpenGenerator: () -> Unit = {},
     onOpenNewReleases: () -> Unit = {},
     onOpenDownloads: () -> Unit = {},
+    onOpenOfflineArtist: (String, String?) -> Unit = { _, _ -> },
     mainShellViewModel: MainShellViewModel = hiltViewModel(),
 ) {
-    val tabs = MainTab.entries
+    val offlineMode by mainShellViewModel.offlineMode.collectAsStateWithLifecycle()
+    val isOffline = offlineMode == true
+    val tabs = remember(isOffline) {
+        if (isOffline) listOf(MainTab.OFFLINE, MainTab.PLAYLISTS)
+        else listOf(MainTab.FEED, MainTab.STATS, MainTab.PLAYLISTS, MainTab.OFFLINE)
+    }
+    // key() rebuilds the pager when offline mode flips, so tab order never goes stale.
+    key(isOffline) {
+        MainShellContent(
+            tabs = tabs,
+            onOpenSettings = onOpenSettings,
+            onOpenSearch = onOpenSearch,
+            onOpenDiscover = onOpenDiscover,
+            onOpenGenres = onOpenGenres,
+            onOpenFriends = onOpenFriends,
+            onOpenFriendProfile = onOpenFriendProfile,
+            onOpenFeedPlaylist = onOpenFeedPlaylist,
+            onOpenPlaylist = onOpenPlaylist,
+            onOpenGenerator = onOpenGenerator,
+            onOpenNewReleases = onOpenNewReleases,
+            onOpenDownloads = onOpenDownloads,
+            onOpenOfflineArtist = onOpenOfflineArtist,
+            mainShellViewModel = mainShellViewModel,
+        )
+    }
+}
+
+@Composable
+private fun MainShellContent(
+    tabs: List<MainTab>,
+    onOpenSettings: () -> Unit,
+    onOpenSearch: () -> Unit,
+    onOpenDiscover: () -> Unit,
+    onOpenGenres: () -> Unit,
+    onOpenFriends: () -> Unit,
+    onOpenFriendProfile: (username: String, displayName: String?, avatarUrl: String?) -> Unit = { _, _, _ -> },
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenPlaylist: (Long) -> Unit = {},
+    onOpenGenerator: () -> Unit = {},
+    onOpenNewReleases: () -> Unit = {},
+    onOpenDownloads: () -> Unit = {},
+    onOpenOfflineArtist: (String, String?) -> Unit = { _, _ -> },
+    mainShellViewModel: MainShellViewModel = hiltViewModel(),
+) {
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -226,7 +278,7 @@ fun MainShell(
     val navGlass = isLiquidGlassBackdropSupported()
 
     Box(Modifier.fillMaxSize()) {
-        val feedIndex = tabs.indexOf(MainTab.FEED)
+        val feedIndex = 0
         HorizontalPager(
             state = pagerState,
             beyondViewportPageCount = 0,
@@ -234,7 +286,7 @@ fun MainShell(
         ) { page ->
             val isCurrent = page == pagerState.currentPage
             PredictiveBackScreen(
-                enabled = isCurrent && tabs[page] != MainTab.FEED,
+                enabled = isCurrent && page != 0,
                 onBack = { scope.launch { pagerState.animateScrollToPage(feedIndex) } },
             ) {
                 when (tabs[page]) {
@@ -259,6 +311,7 @@ fun MainShell(
                         onOpenDownloads = onOpenDownloads,
                     )
                     MainTab.PLAYLISTS -> PlaylistScreen(onOpenPlaylist = onOpenPlaylist)
+                    MainTab.OFFLINE -> OfflineScreen(onOpenArtist = onOpenOfflineArtist)
                 }
             }
         }
@@ -455,7 +508,7 @@ private fun FloatingNavBar(
             // dock Row is never squeezed — the FAB grows beside the dock
             // instead of drawing over the selected pill.
             AnimatedVisibility(
-                visible = selectedIndex == tabs.indexOf(MainTab.PLAYLISTS),
+                visible = selectedIndex == tabs.indexOf(MainTab.PLAYLISTS) && tabs.contains(MainTab.FEED),
                 enter = fadeIn(animationSpec = tween(180)) +
                     scaleIn(initialScale = 0.6f, animationSpec = navSpring()) +
                     expandHorizontally(
@@ -509,12 +562,12 @@ private fun FloatingNavItem(
         targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(
             alpha = if (LocalLiquidGlass.current) 0.28f else 1f,
         ) else Color.Transparent,
-        animationSpec = navSpring(),
+        animationSpec = MaxxSpring.settle(),
         label = "navItemBackground",
     )
     val contentColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = navSpring(),
+        animationSpec = MaxxSpring.settle(),
         label = "navItemContent",
     )
     // Animate the pill padding instead of jumping it: combined with the label
@@ -528,11 +581,18 @@ private fun FloatingNavItem(
         label = "navItemPadding",
     )
 
+    val itemInteraction = remember { MutableInteractionSource() }
+    val iconPop by animateFloatAsState(
+        targetValue = if (selected) 1.14f else 1f,
+        animationSpec = MaxxSpring.bouncy(),
+        label = "navIconPop",
+    )
     Surface(
         onClick = onClick,
+        interactionSource = itemInteraction,
         shape = PillShape,
         color = backgroundColor,
-        modifier = Modifier.height(48.dp),
+        modifier = Modifier.maxxPress(itemInteraction, 0.9f).height(48.dp),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -545,7 +605,7 @@ private fun FloatingNavItem(
                 imageVector = icon,
                 contentDescription = label,
                 tint = contentColor,
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(24.dp).scale(iconPop),
             )
             AnimatedVisibility(
                 visible = selected,
@@ -582,4 +642,5 @@ private fun MainTab.icon(): ImageVector = when (this) {
     MainTab.FEED -> Icons.Filled.Home
     MainTab.STATS -> Icons.Filled.Leaderboard
     MainTab.PLAYLISTS -> Icons.AutoMirrored.Filled.QueueMusic
+    MainTab.OFFLINE -> Icons.Filled.LibraryMusic
 }
