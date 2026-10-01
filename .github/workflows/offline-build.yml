@@ -43,7 +43,7 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --update --channel=3
           sdkmanager --list --channel=3 | grep -E 'platforms;android-(36|37)' || true
-          sdkmanager --install --channel=3 "platforms;android-37" "cmake;3.22.1"
+          sdkmanager --install --channel=3 "platforms;android-37.0" "cmake;3.22.1"
 
       - name: Validate signing secrets
         shell: bash
