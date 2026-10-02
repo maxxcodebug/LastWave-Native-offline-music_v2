@@ -48,7 +48,10 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -111,6 +114,7 @@ fun OfflineScreen(
     var view by remember { mutableIntStateOf(0) }
     var query by remember { mutableStateOf("") }
     var showSheet by remember { mutableStateOf(false) }
+    var confirmExit by remember { mutableStateOf(false) }
 
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) viewModel.addFolder(uri)
@@ -172,6 +176,36 @@ fun OfflineScreen(
                         IconButton(onClick = viewModel::refresh) { Icon(Icons.Filled.Refresh, "Rescan") }
                     }
                     IconButton(onClick = { showSheet = true }) { Icon(Icons.Filled.FolderOpen, "Folders and offline mode") }
+                }
+            }
+
+            if (offlineMode == true) {
+                item(key = "exitOffline") {
+                    Surface(
+                        shape = CircleShape,
+                        color = scheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .padding(horizontal = 20.dp, vertical = 6.dp)
+                            .fillMaxWidth()
+                            .maxxClickable(pressedScale = 0.97f) { confirmExit = true },
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.WifiOff, null, tint = scheme.primary, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                "Offline mode is on",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(Icons.Filled.Wifi, null, tint = scheme.primary, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Go online", color = scheme.primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
 
@@ -258,6 +292,21 @@ fun OfflineScreen(
                 }
             }
         }
+    }
+
+    if (confirmExit) {
+        AlertDialog(
+            onDismissRequest = { confirmExit = false },
+            title = { Text("Leave offline mode?") },
+            text = { Text("Feed, Stats and online features come back. If you're not signed in, you'll go to the sign-in screen.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmExit = false
+                    viewModel.setOfflineMode(false)
+                }) { Text("Go online") }
+            },
+            dismissButton = { TextButton(onClick = { confirmExit = false }) { Text("Stay offline") } },
+        )
     }
 
     if (showSheet) {

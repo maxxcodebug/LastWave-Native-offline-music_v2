@@ -114,9 +114,11 @@ import com.lastwave.app.ui.home.HomeScreen
 import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
 import com.lastwave.app.ui.playlist.PlaylistScreen
 import com.lastwave.app.ui.offline.OfflineScreen
+import com.lastwave.app.ui.equalizer.EqualizerScreen
 import com.lastwave.app.ui.common.MaxxSpring
 import com.lastwave.app.ui.common.maxxPress
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.runtime.key
 import androidx.compose.foundation.shape.CornerBasedShape
 import com.kyant.backdrop.drawBackdrop
@@ -163,6 +165,7 @@ private enum class MainTab(val labelRes: Int) {
     STATS(com.lastwave.app.R.string.nav_stats),
     PLAYLISTS(com.lastwave.app.R.string.nav_playlists),
     OFFLINE(com.lastwave.app.R.string.nav_offline),
+    EQUALIZER(com.lastwave.app.R.string.nav_equalizer),
 }
 
 /** Shared with any screen hosted inside [MainShell] so their scrolling
@@ -210,8 +213,8 @@ fun MainShell(
     val offlineMode by mainShellViewModel.offlineMode.collectAsStateWithLifecycle()
     val isOffline = offlineMode == true
     val tabs = remember(isOffline) {
-        if (isOffline) listOf(MainTab.OFFLINE, MainTab.PLAYLISTS)
-        else listOf(MainTab.FEED, MainTab.STATS, MainTab.PLAYLISTS, MainTab.OFFLINE)
+        if (isOffline) listOf(MainTab.OFFLINE, MainTab.PLAYLISTS, MainTab.EQUALIZER)
+        else listOf(MainTab.FEED, MainTab.STATS, MainTab.EQUALIZER, MainTab.PLAYLISTS, MainTab.OFFLINE)
     }
     // key() rebuilds the pager when offline mode flips, so tab order never goes stale.
     key(isOffline) {
@@ -312,6 +315,7 @@ private fun MainShellContent(
                     )
                     MainTab.PLAYLISTS -> PlaylistScreen(onOpenPlaylist = onOpenPlaylist)
                     MainTab.OFFLINE -> OfflineScreen(onOpenArtist = onOpenOfflineArtist)
+                    MainTab.EQUALIZER -> EqualizerScreen(onOpenSettings = onOpenSettings)
                 }
             }
         }
@@ -487,7 +491,7 @@ private fun FloatingNavBar(
                             },
                         )
                         .padding(horizontal = 8.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(if (tabs.size > 4) 2.dp else 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     tabs.forEachIndexed { index, tab ->
@@ -497,6 +501,7 @@ private fun FloatingNavBar(
                             icon = tab.icon(),
                             selected = selectedIndex == index,
                             onClick = onClick,
+                            compact = tabs.size > 4,
                         )
                     }
                 }
@@ -557,6 +562,7 @@ private fun FloatingNavItem(
     icon: ImageVector,
     selected: Boolean,
     onClick: () -> Unit,
+    compact: Boolean = false,
 ) {
     val backgroundColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(
@@ -576,7 +582,7 @@ private fun FloatingNavItem(
     // competing width animations clipped the pill to a rectangle and cut the
     // label mid-switch.)
     val horizontalPadding by animateDpAsState(
-        targetValue = if (selected) 18.dp else 12.dp,
+        targetValue = if (selected) (if (compact) 14.dp else 18.dp) else (if (compact) 9.dp else 12.dp),
         animationSpec = navSpring(),
         label = "navItemPadding",
     )
@@ -643,4 +649,5 @@ private fun MainTab.icon(): ImageVector = when (this) {
     MainTab.STATS -> Icons.Filled.Leaderboard
     MainTab.PLAYLISTS -> Icons.AutoMirrored.Filled.QueueMusic
     MainTab.OFFLINE -> Icons.Filled.LibraryMusic
+    MainTab.EQUALIZER -> Icons.Filled.Tune
 }

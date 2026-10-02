@@ -3655,7 +3655,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                 )
                                 .padding(8.dp)
                                 .pointerInput(stableKey) {
-                                    detectDragGesturesAfterLongPress(
+                                    detectDragGestures(
                                         onDragStart = {
                                             draggingIndex = index
                                             dragOffsetY = 0f
@@ -3672,12 +3672,12 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                         onDrag = { change, dragAmount ->
                                             change.consume()
                                             val source = draggingIndex
-                                            if (source < 0) return@detectDragGesturesAfterLongPress
+                                            if (source < 0) return@detectDragGestures
                                             dragOffsetY += dragAmount.y
                                             val layoutInfo = listState.layoutInfo
                                             val draggedInfo = layoutInfo.visibleItemsInfo
                                                 .firstOrNull { it.index == source }
-                                                ?: return@detectDragGesturesAfterLongPress
+                                                ?: return@detectDragGestures
                                             val draggedCenter = draggedInfo.offset + draggedInfo.size / 2 + dragOffsetY.toInt()
                                             val target = layoutInfo.visibleItemsInfo.firstOrNull { info ->
                                                 info.index != source &&

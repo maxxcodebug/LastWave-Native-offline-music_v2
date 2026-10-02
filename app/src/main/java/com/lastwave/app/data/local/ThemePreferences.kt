@@ -40,7 +40,7 @@ data class ThemePrefs(
     val amoled: Boolean = false,
     /** Experimental iOS-style liquid-glass materials. Off by default — the
      *  classic opaque look stays untouched until the user opts in. */
-    val liquidGlass: Boolean = false,
+    val liquidGlass: Boolean = true,
 )
 
 @Singleton
@@ -65,7 +65,7 @@ class ThemePreferences @Inject constructor(
                 accentLight = p.readSafely(Keys.ACCENT_LIGHT) ?: "#FF6060",
                 accentMode = AccentMode.fromStorage(p.readSafely(Keys.ACCENT_MODE)),
                 amoled = p.readSafely(Keys.AMOLED) ?: false,
-                liquidGlass = p.readSafely(Keys.LIQUID_GLASS) ?: false,
+                liquidGlass = p.readSafely(Keys.LIQUID_GLASS) ?: true,
             )
         }
 
