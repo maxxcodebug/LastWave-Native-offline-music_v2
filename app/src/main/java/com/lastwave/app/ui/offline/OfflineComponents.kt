@@ -1,6 +1,12 @@
 package com.lastwave.app.ui.offline
 
 import android.provider.DocumentsContract
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
 import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -101,6 +107,12 @@ internal fun OfflineArt(
     }
 }
 
+internal class ReorderCallbacks(
+    val onStart: () -> Unit,
+    val onDelta: (Float) -> Unit,
+    val onEnd: () -> Unit,
+)
+
 @Composable
 internal fun OfflineTrackRow(
     track: OfflineTrack,
@@ -110,16 +122,57 @@ internal fun OfflineTrackRow(
     onAddToQueue: () -> Unit,
     modifier: Modifier = Modifier,
     showAlbumArtist: Boolean = true,
+    reorder: ReorderCallbacks? = null,
+    dragging: Boolean = false,
+    dragOffset: () -> Float = { 0f },
 ) {
     var menu by remember { mutableStateOf(false) }
+    val scheme = MaterialTheme.colorScheme
+    val callbacks by rememberUpdatedState(reorder)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .maxxAppear(index)
+            .zIndex(if (dragging) 1f else 0f)
+            .graphicsLayer {
+                if (dragging) {
+                    translationY = dragOffset()
+                    scaleX = 1.03f
+                    scaleY = 1.03f
+                    shadowElevation = 24f
+                    shape = RoundedCornerShape(20.dp)
+                    clip = false
+                }
+            }
+            .then(if (dragging) Modifier.background(scheme.surfaceContainerHighest, RoundedCornerShape(20.dp)) else Modifier)
             .maxxClickable(pressedScale = 0.97f, onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 8.dp),
+            .padding(horizontal = if (reorder != null) 8.dp else 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (reorder != null) {
+            // Grab this and slide the song up or down. The new order is what plays.
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { callbacks?.onStart?.invoke() },
+                            onDragEnd = { callbacks?.onEnd?.invoke() },
+                            onDragCancel = { callbacks?.onEnd?.invoke() },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                callbacks?.onDelta?.invoke(amount.y)
+                            },
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.DragHandle, "Hold and drag to reorder",
+                    tint = if (dragging) scheme.primary else scheme.onSurfaceVariant,
+                )
+            }
+        }
         OfflineArt(track.artworkUrl, Modifier.size(56.dp), RoundedCornerShape(16.dp))
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {

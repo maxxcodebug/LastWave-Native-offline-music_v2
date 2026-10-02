@@ -32,6 +32,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import com.lastwave.app.data.offline.OfflineTrack
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -116,6 +126,13 @@ fun OfflineScreen(
     var showSheet by remember { mutableStateOf(false) }
     var confirmExit by remember { mutableStateOf(false) }
 
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    var local by remember { mutableStateOf<List<OfflineTrack>?>(null) }
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) viewModel.addFolder(uri)
     }
@@ -130,6 +147,25 @@ fun OfflineScreen(
     }
     val shownAlbums = remember(albums, q) {
         if (q.isEmpty()) albums else albums.filter { it.title.lowercase().contains(q) || it.artist.lowercase().contains(q) }
+    }
+
+    val canReorder = q.isEmpty() && view == OfflineView.SONGS.ordinal
+    // While dragging we show our own list so the rows react instantly;
+    // it is dropped once the saved order has caught up.
+    val songs = if (canReorder) (local ?: shownTracks) else shownTracks
+    val songIds = remember(songs) { songs.mapTo(HashSet()) { it.id } }
+    val songsNow by rememberUpdatedState(songs)
+    val songIdsNow by rememberUpdatedState(songIds)
+
+    LaunchedEffect(shownTracks, draggingId) {
+        val l = local
+        if (l != null && draggingId == null) {
+            if (l.map { it.id } == shownTracks.map { it.id }) local = null
+            else {
+                delay(900)
+                if (draggingId == null) local = null
+            }
+        }
     }
 
     val scheme = MaterialTheme.colorScheme
@@ -147,7 +183,7 @@ fun OfflineScreen(
         )
 
         LazyColumn(
-            state = rememberLazyListState(),
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
                 bottom = FloatingNavDefaults.contentBottomPadding() + 8.dp,
@@ -264,13 +300,69 @@ fun OfflineScreen(
                 }
 
                 when (OfflineView.entries[view]) {
-                    OfflineView.SONGS -> itemsIndexed(shownTracks, key = { _, t -> t.id }) { i, t ->
+                    OfflineView.SONGS -> itemsIndexed(songs, key = { _, t -> t.id }) { i, t ->
+                        val isDragging = draggingId == t.id
+                        val reorder = if (canReorder) remember(t.id) {
+                            ReorderCallbacks(
+                                onStart = {
+                                    draggingId = t.id
+                                    dragOffset = 0f
+                                    if (local == null) local = songsNow
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onDelta = { dy ->
+                                    val id = draggingId
+                                    val cur = local
+                                    if (id != null && cur != null) {
+                                        dragOffset += dy
+                                        val info = listState.layoutInfo
+                                        val dragged = info.visibleItemsInfo.firstOrNull { it.key == id }
+                                        if (dragged != null) {
+                                            val center = dragged.offset + dragged.size / 2 + dragOffset.toInt()
+                                            val target = info.visibleItemsInfo.firstOrNull { v ->
+                                                v.key != id && (v.key as? String)?.let { it in songIdsNow } == true &&
+                                                    center >= v.offset && center <= v.offset + v.size
+                                            }
+                                            if (target != null) {
+                                                val from = cur.indexOfFirst { it.id == id }
+                                                val to = cur.indexOfFirst { it.id == target.key }
+                                                if (from >= 0 && to >= 0 && from != to) {
+                                                    local = cur.toMutableList().apply { add(to, removeAt(from)) }
+                                                    dragOffset += (dragged.offset - target.offset).toFloat()
+                                                    haptics.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+                                                }
+                                            }
+                                            val top = info.viewportStartOffset
+                                            val bottom = info.viewportEndOffset
+                                            val edge = 200
+                                            val step = when {
+                                                center < top + edge -> -28f
+                                                center > bottom - edge -> 28f
+                                                else -> 0f
+                                            }
+                                            if (step != 0f) {
+                                                scope.launch { dragOffset += listState.scrollBy(step) }
+                                            }
+                                        }
+                                    }
+                                },
+                                onEnd = {
+                                    local?.let { viewModel.commitOrder(it.map { x -> x.id }) }
+                                    draggingId = null
+                                    dragOffset = 0f
+                                },
+                            )
+                        } else null
                         OfflineTrackRow(
                             track = t,
                             index = i,
-                            onClick = { viewModel.play(t, shownTracks) },
+                            modifier = if (isDragging) Modifier else Modifier.animateItem(),
+                            onClick = { viewModel.play(t, songs) },
                             onPlayNext = { viewModel.playNext(t) },
                             onAddToQueue = { viewModel.addToQueue(t) },
+                            reorder = reorder,
+                            dragging = isDragging,
+                            dragOffset = { dragOffset },
                         )
                     }
                     OfflineView.ARTISTS -> itemsIndexed(shownArtists, key = { _, a -> "a:" + a.name }) { i, a ->
@@ -318,6 +410,7 @@ fun OfflineScreen(
                 onAdd = { pickFolder.launch(null) },
                 onRemove = viewModel::removeFolder,
                 onOfflineModeChange = viewModel::setOfflineMode,
+                onResetOrder = viewModel::resetOrder,
             )
         }
     }
@@ -385,13 +478,14 @@ private fun HeroCard(
 @Composable
 private fun WaveBars(modifier: Modifier, color: Color) {
     val transition = rememberInfiniteTransition(label = "wave")
-    val phase by transition.animateFloat(
+    val phaseState = transition.animateFloat(
         initialValue = 0f,
         targetValue = (2 * PI).toFloat(),
         animationSpec = infiniteRepeatable(tween(3600, easing = LinearEasing), RepeatMode.Restart),
         label = "phase",
     )
     Canvas(modifier) {
+        val phase = phaseState.value
         val n = 41
         val slot = size.width / n
         val barW = slot * 0.46f
@@ -565,6 +659,7 @@ private fun FoldersSheetContent(
     onAdd: () -> Unit,
     onRemove: (String) -> Unit,
     onOfflineModeChange: (Boolean) -> Unit,
+    onResetOrder: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
@@ -587,7 +682,8 @@ private fun FoldersSheetContent(
             Spacer(Modifier.width(8.dp))
             Text("Add folder")
         }
-        Spacer(Modifier.height(20.dp))
+        TextButton(onClick = onResetOrder) { Text("Reset song order to A-Z") }
+        Spacer(Modifier.height(12.dp))
         Surface(shape = RoundedCornerShape(24.dp), color = scheme.surfaceContainerHigh) {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.WifiOff, null, tint = scheme.primary)

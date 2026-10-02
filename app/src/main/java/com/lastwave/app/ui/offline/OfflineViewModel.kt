@@ -50,6 +50,10 @@ class OfflineViewModel @Inject constructor(
 
     fun refresh() = repository.refresh()
 
+    fun commitOrder(ids: List<String>) = repository.setOrder(ids)
+
+    fun resetOrder() = repository.setOrder(emptyList())
+
     fun addFolder(uri: Uri) {
         runCatching {
             context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)

@@ -284,6 +284,8 @@ class OfflineLibraryRepository @Inject constructor(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private val cacheFile get() = File(context.filesDir, "offline_library.json")
+    private val orderFile get() = File(context.filesDir, "offline_order.json")
+    private val order = MutableStateFlow<List<String>>(loadOrder())
     private val folderTracks = MutableStateFlow<List<OfflineTrack>>(loadCache())
     private val _scanState = MutableStateFlow(ScanState())
     val scanState: StateFlow<ScanState> = _scanState.asStateFlow()
@@ -294,12 +296,33 @@ class OfflineLibraryRepository @Inject constructor(
         .map { list -> list.map { it.toOffline() } }
 
     /** Downloads win over a folder copy of the same song. */
-    val tracks: Flow<List<OfflineTrack>> = combine(downloads, folderTracks) { dl, fs ->
+    val tracks: Flow<List<OfflineTrack>> = combine(downloads, folderTracks, order) { dl, fs, ord ->
         fun key(t: OfflineTrack) = t.title.trim().lowercase() + "\u0000" + t.artist.trim().lowercase()
         val seen = dl.mapTo(HashSet(), ::key)
-        (dl + fs.filter { seen.add(key(it)) })
-            .sortedBy { it.title.lowercase() }
+        val all = dl + fs.filter { seen.add(key(it)) }
+        if (ord.isEmpty()) {
+            all.sortedBy { it.title.lowercase() }
+        } else {
+            // The user's own order first; songs added later follow, A-Z.
+            val rank = HashMap<String, Int>(ord.size * 2)
+            ord.forEachIndexed { i, id -> rank[id] = i }
+            all.sortedWith(compareBy<OfflineTrack>({ rank[it.id] ?: Int.MAX_VALUE }, { it.title.lowercase() }))
+        }
     }
+
+    /** Saves the order the user dragged the songs into. An empty list goes back to A-Z. */
+    fun setOrder(ids: List<String>) {
+        order.value = ids
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                if (ids.isEmpty()) orderFile.delete() else orderFile.writeText(json.encodeToString(ids))
+            }
+        }
+    }
+
+    private fun loadOrder(): List<String> = runCatching {
+        json.decodeFromString<List<String>>(orderFile.readText())
+    }.getOrDefault(emptyList())
 
     fun refresh() {
         scanJob?.cancel()

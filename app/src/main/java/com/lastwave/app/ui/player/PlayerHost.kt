@@ -3665,6 +3665,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                         Modifier.fillMaxWidth().padding(9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+
                         Text(
                             "${index + 1}",
                             style = MaterialTheme.typography.labelSmall,
@@ -3702,23 +3703,25 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+
+                        val indexState = androidx.compose.runtime.rememberUpdatedState(index)
+
                         Icon(
                             Icons.Filled.DragHandle,
                             stringResource(com.lastwave.app.R.string.queue_drag_hint),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isDragging) 1f else 0.6f),
                             modifier = Modifier
-                                .padding(start = 8.dp)
-                                .size(40.dp)
+                                .padding(end = 6.dp)
+                                .size(46.dp)
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(
                                     if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
                                     else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f),
                                 )
-                                .padding(8.dp)
                                 .pointerInput(stableKey) {
                                     detectDragGestures(
                                         onDragStart = {
-                                            draggingIndex = index
+                                            draggingIndex = indexState.value
                                             dragOffsetY = 0f
                                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                         },
@@ -3769,8 +3772,35 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                             }
                                         },
                                     )
-                                },
+                                }
+                                .padding(8.dp),
                         )
+                        PlayerArtwork(item, Modifier.size(50.dp), 13.dp)
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                            Text(
+                                item.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
+                            )
+                            Text(
+                                item.artist,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f)
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (isCurrent) {
+                            Icon(
+                                Icons.Filled.GraphicEq,
+                                "Currently playing",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
                     }
                 }
                 }

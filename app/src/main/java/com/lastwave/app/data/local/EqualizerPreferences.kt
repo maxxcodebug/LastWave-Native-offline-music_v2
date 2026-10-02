@@ -86,6 +86,7 @@ class EqualizerPreferences @Inject constructor(
         val GAINS_DB = stringPreferencesKey("lw_eq_gains")
         val BASS_BOOST = floatPreferencesKey("lw_eq_bass_boost")
         val BALANCE = floatPreferencesKey("lw_eq_balance")
+        val VOLUME_BOOST = floatPreferencesKey("lw_eq_volume_boost")
     }
 
     /** The user's own curve, untouched by the Bass Boost macro. The Equalizer screen edits this. */
@@ -122,13 +123,21 @@ class EqualizerPreferences @Inject constructor(
         .recoverPreferences("EqualizerPreferences.balance")
         .map { p -> (p.readSafely(Keys.BALANCE) ?: 0f).coerceIn(-1f, 1f) }
 
-    /** What the audio engines consume: the user curve plus Bass Boost on the low bands. */
-    val settings: Flow<EqualizerSettings> = kotlinx.coroutines.flow.combine(rawSettings, bassBoost) { raw, bass ->
-        if (bass <= 0.001f) raw else raw.copy(
-            gainsDb = raw.gainsDb.mapIndexed { i, g ->
-                (g + bass * BASS_BOOST_PROFILE_DB.getOrElse(i) { 0f }).coerceIn(-EQ_MAX_GAIN_DB, EQ_MAX_GAIN_DB)
-            },
+    /** 0..1, mapped to a flat 0..+6 dB lift on every band. */
+    val volumeBoost: Flow<Float> = dataStore.data
+        .recoverPreferences("EqualizerPreferences.volume")
+        .map { p -> (p.readSafely(Keys.VOLUME_BOOST) ?: 0f).coerceIn(0f, 1f) }
+
+    /** What the audio engines consume: the user curve plus Bass Boost and Volume Boost. */
+    val settings: Flow<EqualizerSettings> = kotlinx.coroutines.flow.combine(rawSettings, bassBoost, volumeBoost) { raw, bass, vol ->
+        if (bass <= 0.001f && vol <= 0.001f) raw else raw.copy(
+            enabled = true,
+            gainsDb = composeEqGains(raw.gainsDb, raw.enabled, bass, vol),
         )
+    }
+
+    suspend fun setVolumeBoost(value: Float) {
+        dataStore.edit { it[Keys.VOLUME_BOOST] = value.coerceIn(0f, 1f) }
     }
 
     suspend fun setAllGains(gains: List<Float>) {
@@ -184,3 +193,14 @@ class EqualizerPreferences @Inject constructor(
 
 /** Extra dB added per engine band at 100% Bass Boost (low bands only). */
 private val BASS_BOOST_PROFILE_DB = floatArrayOf(6f, 6f, 5.5f, 4.5f, 3f, 1.5f, 0.5f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+
+/**
+ * Final 15-band gains: the user's curve (only when [curveOn]) + Bass Boost on the low bands
+ * + Volume Boost as a flat lift. Everything is clamped to the engine's safe range.
+ */
+fun composeEqGains(curve: List<Float>, curveOn: Boolean, bass: Float, volume: Float): List<Float> =
+    List(EQ_BAND_FREQS_HZ.size) { i ->
+        val base = if (curveOn) curve.getOrElse(i) { 0f } else 0f
+        (base + bass * BASS_BOOST_PROFILE_DB.getOrElse(i) { 0f } + volume * 6f)
+            .coerceIn(-EQ_MAX_GAIN_DB, EQ_MAX_GAIN_DB)
+    }
