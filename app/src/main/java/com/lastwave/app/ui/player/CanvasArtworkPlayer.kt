@@ -12,6 +12,7 @@ import android.graphics.Shader
 import android.graphics.SurfaceTexture
 import android.util.Log
 import android.view.TextureView
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
@@ -20,6 +21,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -27,7 +29,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -58,6 +59,16 @@ private const val REPAINT_TIMEOUT_MS = 700L
 private const val FRAME_CAPTURE_PX = 128
 
 /**
+ * Duration of the single fade that owns the still-cover <-> moving-clip crossfade.
+ *
+ * Callers derive the cover alpha as `1f - <reported clip alpha>`, so this one
+ * duration is the whole contract: two mismatched fades leave the pair summing to
+ * less than full opacity mid-transition and the backdrop shows through the
+ * artwork box. One constant, one animation.
+ */
+internal const val CANVAS_FADE_MS = 300
+
+/**
  * How a motion artwork clip fills its container bounds.
  */
 enum class CanvasContentMode {
@@ -73,7 +84,10 @@ enum class CanvasContentMode {
  * - Zero volume, no audio focus requested (zero ducking or interference with the main music player).
  * - Loops via REPEAT_MODE_ONE.
  * - Cached via [CanvasCache] so repeated loops stream purely from disk.
- * - Smooth 320ms crossfade over still artwork once the first frame arrives.
+ * - Fades itself in over [CANVAS_FADE_MS] once the first frame arrives, and reports
+ *   that exact alpha through [onCoverChanged] so the caller never runs a second,
+ *   competing fade. Pass [fadeOut] to drain the clip through the same fade when the
+ *   caller needs it gone before it leaves the tree.
  * - Pauses decoding when the screen is off or app is backgrounded ([rememberIsForeground]).
  */
 @OptIn(UnstableApi::class)
@@ -88,10 +102,11 @@ fun CanvasArtworkPlayer(
     portraitRevealBounds: IntSize = IntSize.Zero,
     presentationAlpha: () -> Float = { 1f },
     onRenderedChanged: (Boolean) -> Unit = {},
+    onCoverChanged: (Float) -> Unit = {},
+    fadeOut: Boolean = false,
     onFrameCaptured: (Bitmap) -> Unit = {},
     refreshFrameEveryMs: Long? = null,
     frameCapturePx: Int = FRAME_CAPTURE_PX,
-    onCoverChanged: (Float) -> Unit = {},
     bottomFade: Float = 0f,
     bottomFadeEndPx: Float? = null,
     bottomFadeFallbackColor: Int? = null,
@@ -102,7 +117,10 @@ fun CanvasArtworkPlayer(
     var url by remember(canvas) { mutableStateOf(canvas.url) }
     var rendered by remember(canvas) { mutableStateOf(false) }
     var clipAspect by remember(canvas) { mutableFloatStateOf(0f) }
-    var textureView by remember(canvas) { mutableStateOf<TextureView?>(null) }
+    // Deliberately NOT keyed on [canvas]: AndroidView builds its TextureView once via
+    // `factory`, so a per-canvas slot would reset to null on the next track and never
+    // be repopulated - silently disabling the transform and frame capture from then on.
+    var textureView by remember { mutableStateOf<TextureView?>(null) }
     var frameTick by remember(canvas) { mutableIntStateOf(0) }
     var surfaceGeneration by remember(canvas) { mutableIntStateOf(0) }
 
@@ -110,6 +128,7 @@ fun CanvasArtworkPlayer(
     val currentAlignPortraitTop by rememberUpdatedState(alignPortraitTop)
     val currentPortraitRevealBounds by rememberUpdatedState(portraitRevealBounds)
     val currentPresentationAlpha by rememberUpdatedState(presentationAlpha)
+    val currentFadeOut by rememberUpdatedState(fadeOut)
     val reportAspect by rememberUpdatedState(onAspectRatioChanged)
 
     val player = remember {
@@ -165,7 +184,11 @@ fun CanvasArtworkPlayer(
     LaunchedEffect(url) {
         rendered = false
         clipAspect = 0f
-        reportAspect(0f)
+        // Deliberately not reporting aspect 0 here. Zeroing it made the caller's
+        // hero sizing collapse to its short form and then grow again once the new
+        // clip reported its size - two relayouts inside a single track change.
+        // Holding the last known aspect keeps the box still until real geometry
+        // arrives; teardown still reports 0 via onDispose.
         val item = MediaItem.Builder().setUri(url)
         mimeTypeOf(url)?.let { item.setMimeType(it) }
         player.setMediaItem(item.build())
@@ -190,9 +213,26 @@ fun CanvasArtworkPlayer(
         }
     }
 
+    val alpha by animateFloatAsState(
+        // [fadeOut] drains the clip through the same fade the enter uses, so a caller
+        // that has to unmount it (the next track has no canvas) can raise the still
+        // cover underneath instead of the clip popping out of the tree.
+        targetValue = if (rendered && !currentFadeOut) 1f else 0f,
+        animationSpec = tween(durationMillis = CANVAS_FADE_MS),
+        label = "canvasAlpha",
+    )
+
+    // Report both signals synchronously. Going through LaunchedEffect/snapshotFlow
+    // cost a frame plus a coroutine dispatch before the caller could even start its
+    // own fade, which is what left the crossfade permanently out of step.
     val reportRendered by rememberUpdatedState(onRenderedChanged)
-    LaunchedEffect(rendered) {
+    val reportCover by rememberUpdatedState(onCoverChanged)
+    SideEffect {
         reportRendered(rendered)
+        reportCover(alpha * currentPresentationAlpha())
+    }
+
+    LaunchedEffect(rendered) {
         if (!rendered) return@LaunchedEffect
         withFrameMillis { }
         val view = textureView ?: return@LaunchedEffect
@@ -215,22 +255,12 @@ fun CanvasArtworkPlayer(
         }
     }
 
-    val alpha by animateFloatAsState(
-        targetValue = if (rendered) 1f else 0f,
-        animationSpec = tween(durationMillis = 320),
-        label = "canvasAlpha",
-    )
-
-    val reportCover by rememberUpdatedState(onCoverChanged)
-    LaunchedEffect(Unit) {
-        snapshotFlow { alpha * currentPresentationAlpha() }.collect { reportCover(it) }
-    }
-
     DisposableEffect(Unit) {
         onDispose {
             reportRendered(false)
             reportCover(0f)
             reportAspect(0f)
+            textureView = null
         }
     }
 
@@ -241,7 +271,7 @@ fun CanvasArtworkPlayer(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
-                isOpaque = false
+                isOpaque = true
                 this.alpha = 0f
                 player.setVideoTextureView(this)
 
@@ -290,22 +320,34 @@ fun CanvasArtworkPlayer(
                     }
                 }
             }
+            val background = View(viewContext).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+                setBackgroundColor(android.graphics.Color.BLACK)
+                this.alpha = 0f
+            }
             textureView = texture
             FadingBottomFrame(viewContext).apply {
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
+                addView(background)
                 addView(texture)
             }
         },
         update = { frame ->
-            val view = frame.getChildAt(0) as TextureView
-            view.alpha = if (contentMode == CanvasContentMode.FIT_PORTRAIT && clipAspect <= 0f) {
+            val bg = frame.getChildAt(0)
+            val view = frame.getChildAt(1) as TextureView
+            val effectiveAlpha = if (contentMode == CanvasContentMode.FIT_PORTRAIT && clipAspect <= 0f) {
                 0f
             } else {
                 alpha * presentationAlpha()
             }
+            bg.alpha = effectiveAlpha
+            view.alpha = effectiveAlpha
             view.applyContentTransform(clipAspect, contentMode, alignPortraitTop)
             // Fade the clip with a plain saveLayer + DST_IN gradient on the parent
             // FrameLayout, on every API level. The Android 12+ branch used to attach a

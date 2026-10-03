@@ -96,6 +96,7 @@ import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BubbleChart
@@ -447,6 +448,7 @@ fun SettingsScreen(
     val usbExclusiveEnabled by viewModel.usbExclusiveEnabled.collectAsStateWithLifecycle()
     val loudness by viewModel.loudness.collectAsStateWithLifecycle()
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
+    val discordPresenceEnabled by viewModel.discordPresenceEnabled.collectAsStateWithLifecycle()
     val isLastFmConnected by viewModel.isLastFmConnected.collectAsStateWithLifecycle()
     val hasApiKey by viewModel.hasApiKey.collectAsStateWithLifecycle()
     val lastFmAuthUrl by viewModel.lastFmAuthUrl.collectAsStateWithLifecycle()
@@ -656,10 +658,20 @@ fun SettingsScreen(
                     null -> {
                         item {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                SectionLabel("Services & Addons")
-                                SettingsGroup(rowCount = 2) { index, position ->
+                                SectionLabel("Services & Add-ons")
+                                SettingsGroup(rowCount = 3) { index, position ->
                                     when (index) {
                                         0 -> SettingsActionCard(
+                                            icon = Icons.Filled.Extension,
+                                            iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                            iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            title = stringResource(R.string.settings_modules_title),
+                                            subtitle = stringResource(R.string.settings_modules_sub),
+                                            onClick = onOpenModules,
+                                            position = position,
+                                            isHighlighted = (highlightedSettingId == "services.modules" || highlightedSettingId == "library.modules"),
+                                        )
+                                        1 -> SettingsActionCard(
                                             icon = Icons.Filled.Album,
                                             iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                             iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -1488,6 +1500,26 @@ fun SettingsScreen(
                             }
                         },
                     )
+                    // Discord presence, next to Last.fm because both are "tell
+                    // other services what I'm listening to" integrations and
+                    // neither is required for playback. Unlike Last.fm this
+                    // needs no account in LastWave — it publishes as the
+                    // LastWave application through the Discord app itself, so
+                    // the copy says exactly that.
+                    SettingsToggleCard(
+                        icon = Icons.Filled.Public,
+                        iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                        iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        title = "Discord Rich Presence",
+                        subtitle = if (discordPresenceEnabled) {
+                            "On • your track, quality and cover show on your Discord profile"
+                        } else {
+                            "Off • LastWave stays off your Discord profile"
+                        },
+                        checked = discordPresenceEnabled,
+                        onCheckedChange = viewModel::setDiscordPresenceEnabled,
+                        isHighlighted = (highlightedSettingId == "discord.presence"),
+                    )
                 }
             }
                     }
@@ -1572,61 +1604,7 @@ fun SettingsScreen(
                                 }
                             }
                         }
-                        item {
-                            Card(
-                                onClick = onOpenModules,
-                                shape = RoundedCornerShape(22.dp),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .settingHighlightGlow(
-                                        isHighlighted = (highlightedSettingId == "library.modules"),
-                                        shape = RoundedCornerShape(22.dp),
-                                    ),
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp).fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(44.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.secondary),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Icon(
-                                            Icons.Filled.Extension,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onSecondary,
-                                            modifier = Modifier.size(22.dp),
-                                        )
-                                    }
-                                    Spacer(Modifier.width(16.dp))
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            stringResource(R.string.settings_modules_title),
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        )
-                                        Spacer(Modifier.height(2.dp))
-                                        Text(
-                                            stringResource(R.string.settings_modules_sub),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
-                                        )
-                                    }
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.ArrowForwardIos,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f),
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                }
-                            }
-                        }
+
 
 
                     }
@@ -2178,6 +2156,7 @@ fun SettingsScreen(
                     .fillMaxWidth()
                     .adaptiveContentWidth(maxWidth = 640.dp)
                     .align(Alignment.CenterHorizontally)
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp)
                     .padding(bottom = 24.dp + safeDrawingBottomPadding()),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -2328,6 +2307,7 @@ fun SettingsScreen(
                     .fillMaxWidth()
                     .adaptiveContentWidth(maxWidth = 640.dp)
                     .align(Alignment.CenterHorizontally)
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp)
                     .padding(bottom = 24.dp + safeDrawingBottomPadding()),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -2805,7 +2785,7 @@ private fun SettingsActionCard(
             IconBadge(icon, iconContainer, iconTint)
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = titleColor, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = titleColor, maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             }
             Icon(
