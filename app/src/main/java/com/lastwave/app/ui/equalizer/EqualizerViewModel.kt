@@ -86,24 +86,12 @@ class EqualizerViewModel @Inject constructor(
     val volume: StateFlow<Float> = _volume.asStateFlow()
 
     private val previews = Channel<Pair<Boolean, FloatArray>>(Channel.CONFLATED)
-    private val boostPreviews = Channel<Float>(Channel.CONFLATED)
 
     init {
         viewModelScope.launch(Dispatchers.Default) {
             for ((on, gains) in previews) {
                 try {
                     audioEngine.get().setEqualizer(on, gains)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                } catch (_: LinkageError) {
-                }
-            }
-        }
-        viewModelScope.launch(Dispatchers.Default) {
-            for (db in boostPreviews) {
-                try {
-                    audioEngine.get().setVolumeBoostDb(db)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
@@ -131,9 +119,8 @@ class EqualizerViewModel @Inject constructor(
             bass = _bass.value,
             volume = _volume.value,
         )
-        val on = _enabled.value || _bass.value > 0.001f
+        val on = _enabled.value || _bass.value > 0.001f || _volume.value > 0.001f
         previews.trySend(on to gains.toFloatArray())
-        boostPreviews.trySend(_volume.value * VOLUME_BOOST_MAX_DB)
     }
 
     fun setEnabled(on: Boolean) {

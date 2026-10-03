@@ -35,7 +35,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.lastwave.app.BuildConfig
 import com.lastwave.app.ui.common.maxxClickable
 
 private const val MY_NAME = "Anshuman X"
@@ -93,7 +92,7 @@ fun MaxxContributionEntry() {
 fun MaxxContributionDialog(onDismiss: () -> Unit) {
     val uri = LocalUriHandler.current
     val scheme = MaterialTheme.colorScheme
-    val offlineOnly = BuildConfig.OFFLINE_ONLY
+    val offlineOnly = false
     val work = if (offlineOnly) OFFLINE_APP_WORK else ONLINE_APP_WORK
 
     fun open(url: String) = runCatching { uri.openUri(url) }
