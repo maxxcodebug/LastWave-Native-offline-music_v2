@@ -449,6 +449,7 @@ private fun FloatingNavBar(
     val liquidGlass = LocalLiquidGlass.current
     val glassHoverIndex = remember(liquidGlass) { mutableStateOf<Int?>(null) }
     val glassNavBounds = remember { mutableStateMapOf<Int, Rect>() }
+    val onSelectState = androidx.compose.runtime.rememberUpdatedState(onSelect)
     val dockInteraction = remember { MutableInteractionSource() }
     val fabInteraction = remember { MutableInteractionSource() }
     
@@ -511,15 +512,22 @@ private fun FloatingNavBar(
                                     }
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed = false)
-                                        glassHoverIndex.value = hitIndex(down.position)
+                                        val startIndex = hitIndex(down.position)
+                                        var lastIndex = startIndex
+                                        glassHoverIndex.value = startIndex
                                         while (true) {
                                             val event = awaitPointerEvent()
                                             val change = event.changes.firstOrNull { it.id == down.id }
                                             if (change == null || !change.pressed) {
                                                 glassHoverIndex.value = null
+                                                // Slide across the pill and lift: open the tab under the finger.
+                                                val target = lastIndex
+                                                if (target != null && target != startIndex) onSelectState.value(target)
                                                 break
                                             }
-                                            glassHoverIndex.value = hitIndex(change.position)
+                                            val here = hitIndex(change.position)
+                                            if (here != null) lastIndex = here
+                                            glassHoverIndex.value = here
                                         }
                                     }
                                 }

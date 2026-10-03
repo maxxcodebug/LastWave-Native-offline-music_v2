@@ -23,6 +23,9 @@ import javax.inject.Inject
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
+/** Volume Boost at 100%, in dB. Applied as a real gain stage ahead of the limiter. */
+const val VOLUME_BOOST_MAX_DB = 12f
+
 /** The 10 sliders on screen. The audio engine has 15 bands; see [expand]. */
 val UI_BAND_FREQS = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
 private val UI_TO_ENGINE = intArrayOf(0, 2, 3, 5, 6, 8, 10, 11, 13, 14)
@@ -83,12 +86,24 @@ class EqualizerViewModel @Inject constructor(
     val volume: StateFlow<Float> = _volume.asStateFlow()
 
     private val previews = Channel<Pair<Boolean, FloatArray>>(Channel.CONFLATED)
+    private val boostPreviews = Channel<Float>(Channel.CONFLATED)
 
     init {
         viewModelScope.launch(Dispatchers.Default) {
             for ((on, gains) in previews) {
                 try {
                     audioEngine.get().setEqualizer(on, gains)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                } catch (_: LinkageError) {
+                }
+            }
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            for (db in boostPreviews) {
+                try {
+                    audioEngine.get().setVolumeBoostDb(db)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
@@ -116,8 +131,9 @@ class EqualizerViewModel @Inject constructor(
             bass = _bass.value,
             volume = _volume.value,
         )
-        val on = _enabled.value || _bass.value > 0.001f || _volume.value > 0.001f
+        val on = _enabled.value || _bass.value > 0.001f
         previews.trySend(on to gains.toFloatArray())
+        boostPreviews.trySend(_volume.value * VOLUME_BOOST_MAX_DB)
     }
 
     fun setEnabled(on: Boolean) {

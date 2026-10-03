@@ -107,7 +107,7 @@ class NativeAudioEngine @Inject constructor(
     }
 
     internal fun setOutputVolume(volume: Float) {
-        withHandle(Unit) { nativeSetOutputVolume(it, volume.coerceIn(0f, 1f)) }
+        withHandle(Unit) { nativeSetOutputVolume(it, volume.coerceIn(0f, 4f)) }
     }
 
     /** Thread-safe; native DSP crossfades wet/dry over exactly 50 ms.
@@ -140,6 +140,12 @@ class NativeAudioEngine @Inject constructor(
             if (gain.isFinite()) gain.coerceIn(-EQ_MAX_GAIN_DB, EQ_MAX_GAIN_DB) else 0f
         }
         withHandle(Unit) { nativeSetEqualizer(it, enabled, safeGains) }
+        // The native EQ lowers its own level by (peak boost - 1 dB) so boosts cannot clip.
+        // Hand that back as make-up gain, otherwise Bass / Volume Boost only re-balance
+        // the sound and the whole track gets quieter instead of louder.
+        val peak = if (enabled) (safeGains.maxOrNull() ?: 0f) else 0f
+        val makeupDb = (peak - 0.3f).coerceIn(0f, 12f)
+        setOutputVolume(Math.pow(10.0, makeupDb / 20.0).toFloat())
     }
 
     /**

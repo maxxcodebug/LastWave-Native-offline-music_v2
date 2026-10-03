@@ -722,11 +722,24 @@ fun SettingsScreen(
                         }
 
                         item {
+                            var showMaxxDialog by remember { mutableStateOf(false) }
+                            if (showMaxxDialog) {
+                                com.lastwave.app.ui.settings.MaxxContributionsDialog(onDismiss = { showMaxxDialog = false })
+                            }
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 SectionLabel("System & About")
-                                SettingsGroup(rowCount = 2) { index, position ->
+                                SettingsGroup(rowCount = 3) { index, position ->
                                     when (index) {
                                         0 -> SettingsActionCard(
+                                            icon = androidx.compose.material.icons.Icons.Filled.Favorite,
+                                            iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                            iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            title = "Maxx Contributions",
+                                            subtitle = "Offline player, MaxxEqualizer Lite, credits & links",
+                                            onClick = { showMaxxDialog = true },
+                                            position = position,
+                                        )
+                                        1 -> SettingsActionCard(
                                             icon = Icons.Filled.Backup,
                                             iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                             iconTint = MaterialTheme.colorScheme.onTertiaryContainer,

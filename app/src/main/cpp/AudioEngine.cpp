@@ -144,7 +144,7 @@ bool AudioEngine::startLocked(std::int32_t preferredOutputSampleRate) {
     underrunAnchor_.fill(0.0F);
     lastOutput_.fill(0.0F);
     currentOutputVolume_ = std::clamp(
-        targetOutputVolume_.load(std::memory_order_acquire), 0.0F, 1.0F);
+        targetOutputVolume_.load(std::memory_order_acquire), 0.0F, 4.0F);
     outputVolumeRampStep_ = 1.0F /
         std::max(1.0F, static_cast<float>(sampleRate) * 0.005F);
 
@@ -354,7 +354,7 @@ void AudioEngine::setPlaying(bool playing) noexcept {
 
 void AudioEngine::setOutputVolume(float volume) noexcept {
     if (!std::isfinite(volume)) volume = 1.0F;
-    targetOutputVolume_.store(std::clamp(volume, 0.0F, 1.0F), std::memory_order_release);
+    targetOutputVolume_.store(std::clamp(volume, 0.0F, 4.0F), std::memory_order_release);
 }
 
 void AudioEngine::flushResampler() {
@@ -682,6 +682,17 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
                 : recoveryGain * currentOutputVolume_;
             output[offset] *= gain;
             output[offset + 1U] *= gain;
+            if (gain > 1.0001F) {
+                // Make-up gain for EQ/Volume Boost: round off peaks instead of hard clipping.
+                for (std::size_t ch = 0; ch < 2U; ++ch) {
+                    const float x = output[offset + ch];
+                    const float a = std::fabs(x);
+                    if (a > 0.8F) {
+                        const float y = 0.8F + 0.2F * std::tanh((a - 0.8F) / 0.2F);
+                        output[offset + ch] = x < 0.0F ? -y : y;
+                    }
+                }
+            }
         }
         lastOutput_[0] = output[(validFrames - 1U) * kOutputChannels];
         lastOutput_[1] = output[(validFrames - 1U) * kOutputChannels + 1U];

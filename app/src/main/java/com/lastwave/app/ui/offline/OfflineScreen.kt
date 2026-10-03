@@ -474,18 +474,13 @@ private fun HeroCard(
     }
 }
 
-/** Bars swell in the middle and wobble on a slow loop (same idea as the Dolby card). */
+/** Bars swell in the middle. Springs in once, then stays still (wave-static). */
 @Composable
 private fun WaveBars(modifier: Modifier, color: Color) {
-    val transition = rememberInfiniteTransition(label = "wave")
-    val phaseState = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2 * PI).toFloat(),
-        animationSpec = infiniteRepeatable(tween(3600, easing = LinearEasing), RepeatMode.Restart),
-        label = "phase",
-    )
+    val intro = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(Unit) { intro.animateTo(1f, MaxxSpring.soft()) }
     Canvas(modifier) {
-        val phase = phaseState.value
+        val grow = intro.value.coerceIn(0f, 1.15f)
         val n = 41
         val slot = size.width / n
         val barW = slot * 0.46f
@@ -493,8 +488,8 @@ private fun WaveBars(modifier: Modifier, color: Color) {
             val u = i / (n - 1f)
             val swell = sin(PI * u).toFloat()
             val env = 0.16f + 0.84f * swell * swell
-            val wob = 0.55f + 0.45f * sin(phase + i * 0.55f)
-            val h = (size.height * env * wob).coerceAtLeast(6f)
+            val wob = 0.62f + 0.38f * sin(i * 0.9f + 1.2f)
+            val h = (size.height * env * wob * grow).coerceAtLeast(6f)
             drawRoundRect(
                 color = color.copy(alpha = 0.30f + 0.70f * env),
                 topLeft = Offset(slot * (i + 0.5f) - barW / 2, (size.height - h) / 2),

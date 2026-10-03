@@ -15,7 +15,7 @@ import javax.inject.Singleton
  *  band sliders map onto. Low end is bass body, mid range carries vocals,
  *  the top end is air and sparkle. */
 val EQ_BAND_FREQS_HZ = intArrayOf(25, 40, 63, 100, 160, 250, 400, 630, 1000, 1600, 2500, 4000, 6300, 10000, 16000)
-const val EQ_MAX_GAIN_DB = 8f
+const val EQ_MAX_GAIN_DB = 12f
 
 /** Compact frequency label under each band slider ("63", "1K", "16K"...). */
 fun eqBandLabel(hz: Int): String = if (hz >= 1000) "${hz / 1000}K" else "$hz"
@@ -192,7 +192,7 @@ class EqualizerPreferences @Inject constructor(
 }
 
 /** Extra dB added per engine band at 100% Bass Boost (low bands only). */
-private val BASS_BOOST_PROFILE_DB = floatArrayOf(6f, 6f, 5.5f, 4.5f, 3f, 1.5f, 0.5f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+private val BASS_BOOST_PROFILE_DB = floatArrayOf(11f, 11f, 10f, 8f, 5.5f, 3f, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
 
 /**
  * Final 15-band gains: the user's curve (only when [curveOn]) + Bass Boost on the low bands
