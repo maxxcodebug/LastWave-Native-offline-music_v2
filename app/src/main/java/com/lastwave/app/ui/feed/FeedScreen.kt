@@ -209,7 +209,7 @@ fun FeedScreen(
                     HeaderActionIcon(Icons.Filled.Download, "Downloads", onOpenDownloads)
                     HeaderActionIcon(Icons.Filled.Search, "Search", onOpenSearch)
                     IconButton(onClick = onOpenSettings) {
-                        com.lastwave.app.ui.home.ProfileAvatar(avatarUrl = state.avatarUrl, modifier = Modifier.size(32.dp))
+                        com.lastwave.app.ui.home.ProfileAvatar(avatarUrl = state.avatarUrl, modifier = Modifier.size(38.dp))
                     }
                 },
             )
@@ -1010,7 +1010,7 @@ private fun TasteStrip(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         FeedSectionHeader(
-            title = "Your sound",
+            title = "My Genre",
             subtitle = "Tap a vibe to start instant radio",
         )
         LazyRow(
@@ -1182,14 +1182,12 @@ private fun QuickTilesGrid(
     tiles: List<FeedQuickTile>,
     onTileClick: (FeedQuickTile) -> Unit,
 ) {
-    androidx.compose.foundation.lazy.grid.LazyHorizontalGrid(
-        rows = androidx.compose.foundation.lazy.grid.GridCells.Fixed(2),
-        modifier = Modifier.fillMaxWidth().height(160.dp),
+    androidx.compose.foundation.lazy.LazyRow(
+        modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(tiles, key = { "${it.title}_${it.collection ?: ""}_${it.playlistId ?: ""}_${it.localPlaylistId ?: ""}" }) { tile ->
+        items(tiles) { tile ->
             QuickTileCard(
                 tile = tile,
                 onClick = { onTileClick(tile) },
@@ -1210,7 +1208,8 @@ private fun QuickTileCard(
     val isYtLikedTile = tile.collection == "yt_liked" || tile.playlistId == "yt_liked"
     val isLocalLikedTile = tile.isLiked && !isYtLikedTile
     val isLikedTile = isYtLikedTile || isLocalLikedTile
-    val isMixTile = tile.collection == "radio" || tile.title.contains("Mix", ignoreCase = true)
+    val isMixTile = tile.collection == "mix" || tile.title.contains("Mix", ignoreCase = true)
+    val isDiscoverTile = tile.collection == "radio" || tile.title.contains("Discover", ignoreCase = true)
     val isNewReleasesTile = tile.collection == "new_releases"
 
     val iconGradient = when {
@@ -1220,8 +1219,11 @@ private fun QuickTileCard(
         isMixTile -> Brush.linearGradient(
             colors = listOf(MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.secondary),
         )
-        isNewReleasesTile -> Brush.linearGradient(
+        isDiscoverTile -> Brush.linearGradient(
             colors = listOf(MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.tertiary),
+        )
+        isNewReleasesTile -> Brush.linearGradient(
+            colors = listOf(MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.error),
         )
         else -> Brush.linearGradient(
             colors = listOf(
@@ -1237,7 +1239,8 @@ private fun QuickTileCard(
         color = when {
             isLikedTile -> MaterialTheme.colorScheme.primaryContainer
             isMixTile -> MaterialTheme.colorScheme.secondaryContainer
-            isNewReleasesTile -> MaterialTheme.colorScheme.tertiaryContainer
+            isDiscoverTile -> MaterialTheme.colorScheme.tertiaryContainer
+            isNewReleasesTile -> MaterialTheme.colorScheme.errorContainer
             else -> MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.75f)
         },
         border = androidx.compose.foundation.BorderStroke(
@@ -1275,12 +1278,33 @@ private fun QuickTileCard(
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.size(36.dp),
                     )
+                } else if (isMixTile) {
+                    Icon(
+                        Icons.Filled.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.size(36.dp),
+                    )
+                } else if (isDiscoverTile) {
+                    Icon(
+                        Icons.Filled.Explore,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.size(36.dp),
+                    )
+                } else if (isNewReleasesTile) {
+                    Icon(
+                        Icons.Filled.NewReleases,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(36.dp),
+                    )
                 } else {
                     ArtworkImage(
                         name = tile.title,
                         artist = tile.subtitle ?: "",
                         embeddedUrl = tile.artworkUrl,
-                        fallbackIcon = if (isMixTile) Icons.Filled.AutoAwesome else if (isNewReleasesTile) Icons.Filled.NewReleases else Icons.Filled.Album,
+                        fallbackIcon = Icons.Filled.Album,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

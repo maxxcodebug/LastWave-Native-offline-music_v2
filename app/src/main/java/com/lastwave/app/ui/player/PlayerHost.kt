@@ -116,6 +116,7 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.SurroundSound
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.FavoriteBorder
@@ -151,10 +152,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -217,8 +221,13 @@ import com.lastwave.app.playback.formatSampleRateKHz
 import com.lastwave.app.playback.isSpatialAudioCodec
 import com.lastwave.app.playback.qualityBadgeLabel
 import com.lastwave.app.playback.PlaybackProgressState
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.lastwave.app.data.artwork.ArtworkNormalizer
 import com.lastwave.app.playback.PlayableTrack
 import com.lastwave.app.ui.common.ArtworkImage
+import com.lastwave.app.ui.common.ArtworkViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import com.lastwave.app.ui.common.ExpressiveInlineLoadingIndicator
 import com.lastwave.app.ui.common.ExpressiveMotion
 import com.lastwave.app.ui.common.PlaylistCover
@@ -626,6 +635,7 @@ fun PlayerHost(
     var expanded by rememberSaveable { mutableStateOf(false) }
     var currentTab by rememberSaveable { mutableStateOf(FullPlayerTab.NOW_PLAYING) }
     var playlistTrack by remember { mutableStateOf<PlayableTrack?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     val requestAddToPlaylist = remember(viewModel) {
         { track: PlayableTrack ->
             viewModel.prepareCustomPlaylists()
@@ -702,44 +712,11 @@ fun PlayerHost(
                 )
                 
                 // Sleep Timer Button
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = if (hasBottomNavigation) 160.dp else 80.dp)
-                ) {
-                    androidx.compose.material3.Surface(
-                        shape = androidx.compose.foundation.shape.CircleShape,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.secondaryContainer,
-                        shadowElevation = 6.dp,
-                        modifier = Modifier
-                            .height(48.dp)
-                            .defaultMinSize(minWidth = 48.dp)
-                            .clickable(onClick = { viewModel.player.cycleSleepTimer() })
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        ) {
-                            androidx.compose.material3.Icon(
-                                imageVector = androidx.compose.material.icons.Icons.Filled.Timer,
-                                contentDescription = "Sleep Timer",
-                                tint = androidx.compose.material3.MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            if (playbackState.sleepTimerRemainingMs != null) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                val minutes = (playbackState.sleepTimerRemainingMs!! / 60000).toInt()
-                                val seconds = ((playbackState.sleepTimerRemainingMs!! % 60000) / 1000).toInt()
-                                androidx.compose.material3.Text(
-                                    text = String.format("%02d:%02d", minutes, seconds),
-                                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
-                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSecondaryContainer,
-                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
+                if (!expanded) {
+                    DraggableSleepTimerOverlay(
+                        sleepTimerRemainingMs = playbackState.sleepTimerRemainingMs,
+                        onCycleTimer = { viewModel.player.cycleSleepTimer() },
+                    )
                 }
             }
             if (activeDownloads.isNotEmpty() && !expanded) {
@@ -752,7 +729,7 @@ fun PlayerHost(
             }
             var isPlayerDragging by remember { mutableStateOf(false) }
             AnimatedVisibility(
-                modifier = Modifier.zIndex(1f),
+                modifier = Modifier,
                 visible = expanded && state.current != null,
                 enter = slideInVertically(
                     animationSpec = ExpressiveMotion.smoothSpring(),
@@ -790,7 +767,13 @@ fun PlayerHost(
                 }
             }
             
-            bottomNavSlot.value()
+            AnimatedVisibility(
+                visible = !expanded || state.current == null,
+                enter = fadeIn(tween(150)),
+                exit = fadeOut(tween(150)),
+            ) {
+                bottomNavSlot.value()
+            }
             
             playlistTrack?.let { track ->
                 AddToPlaylistDialogHost(
@@ -800,6 +783,7 @@ fun PlayerHost(
                     onAdd = { playlistIds, duplicatePlaylistIds ->
                         viewModel.addToPlaylists(playlistIds, duplicatePlaylistIds, track)
                         playlistTrack = null
+                        android.widget.Toast.makeText(context, "Added to playlist", android.widget.Toast.LENGTH_SHORT).show()
                     },
                     onFindDuplicates = { playlistIds ->
                         viewModel.findDuplicatePlaylistIds(playlistIds, track)
@@ -929,36 +913,7 @@ private fun MiniPlayer(
     val liquidGlass = LocalLiquidGlass.current
     val isGlass = liquidGlass && isLiquidGlassBackdropSupported() && backdrop != null
     val layer = rememberGraphicsLayer()
-    val luminance = remember { Animatable(0.5f) }
-    LaunchedEffect(layer, isGlass, track.videoId) {
-        if (!isGlass) {
-            luminance.snapTo(0.5f)
-            return@LaunchedEffect
-        }
-        val buffer = IntBuffer.allocate(25)
-        while (isActive) {
-            try {
-                withContext(Dispatchers.IO) {
-                    val thumbnail = layer.toImageBitmap()
-                        .asAndroidBitmap()
-                        .scale(5, 5, false)
-                        .copy(Bitmap.Config.ARGB_8888, false)
-                    buffer.rewind()
-                    thumbnail.copyPixelsToBuffer(buffer)
-                }
-            } catch (_: Exception) {
-            }
-            val avg = (0 until 25).sumOf { i ->
-                val c = buffer.get(i)
-                val r = (c shr 16 and 0xFF) / 255f
-                val g = (c shr 8 and 0xFF) / 255f
-                val b = (c and 0xFF) / 255f
-                0.2126 * r + 0.7152 * g + 0.0722 * b
-            } / 25
-            luminance.animateTo(avg.coerceIn(0.3, 0.8).toFloat(), tween(500))
-            delay(1.seconds)
-        }
-    }
+    val luminance = 0.5f // Fixed luminance to avoid heavy GPU readback which causes stuttering
     val barInteraction = remember { MutableInteractionSource() }
     var dragX by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
     var dragY by remember(track.videoId, track.title) { mutableFloatStateOf(0f) }
@@ -1004,8 +959,7 @@ private fun MiniPlayer(
                     if (abs(dragX + amount.x) > abs(dragY + amount.y)) dragX += amount.x
                     else dragY += amount.y
                 }
-            }
-            .clickable(interactionSource = barInteraction, indication = null, onClick = onExpand),
+            },
         contentAlignment = Alignment.Center,
     ) {
         Surface(
@@ -1016,9 +970,10 @@ private fun MiniPlayer(
             shadowElevation = if (edgeToEdge || isGlass) 0.dp else 12.dp,
             modifier = Modifier.fillMaxWidth().then(
                 if (isGlass && backdrop != null) {
-                    Modifier.liquidGlass(backdrop, layer, luminance.value, shape)
+                    Modifier.liquidGlass(backdrop, layer, luminance, shape)
                 } else Modifier
-            ),
+            )
+            .clickable(interactionSource = barInteraction, indication = null, onClick = onExpand),
         ) {
             Column(
                 modifier = if (edgeToEdge) {
@@ -1672,6 +1627,8 @@ private fun AddToPlaylistDialog(
 
 private enum class SeekDirection { REWIND, FORWARD }
 
+private const val HERO_FADE_FRACTION = 0.42f
+
 @Composable
 private fun FullPlayer(
     state: MusicPlayerState,
@@ -1704,12 +1661,20 @@ private fun FullPlayer(
     val isCanvasActive = canvasEnabled && canvas != null
     val showFullBleed = canvasFullBleedEnabled
     val showSleeveCanvas = isCanvasActive && !showFullBleed
-    val activeCanvas = remember(canvas, showFullBleed) {
-        val tall = canvas?.tallUrl
-        if (showFullBleed && canvas != null && !tall.isNullOrBlank()) {
-            canvas.copy(url = tall)
+    // activeCanvas is the single gate every render branch below keys off, so it also
+    // carries the Animated Album Canvas toggle. The ViewModel nulls canvasState
+    // asynchronously, so without this a disabled toggle still paints one frame of
+    // motion artwork over the cover.
+    val activeCanvas = remember(canvas, showFullBleed, canvasEnabled) {
+        if (!canvasEnabled) {
+            null
         } else {
-            canvas
+            val tall = canvas?.tallUrl
+            if (showFullBleed && canvas != null && !tall.isNullOrBlank()) {
+                canvas.copy(url = tall)
+            } else {
+                canvas
+            }
         }
     }
     var canvasAspect by remember(activeCanvas?.url) { mutableFloatStateOf(0f) }
@@ -1761,11 +1726,19 @@ private fun FullPlayer(
     // once per track through the shared Coil loader (normally a cache hit)
     // with Palette; any failure leaves the standard surface gradient.
     val context = LocalContext.current
+    val artworkViewModel: ArtworkViewModel = hiltViewModel()
+    val artworkKey = remember(track.title, track.artist) { ArtworkNormalizer.cacheKey(track.title, track.artist) }
+    val resolvedAmbientUrl by remember(artworkKey) {
+        artworkViewModel.resolved.map { it[artworkKey] }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = artworkViewModel.resolved.value[artworkKey])
+
     var ambientPrimary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
     var ambientSecondary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
     var ambientTertiary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
-    LaunchedEffect(track.videoId, track.artworkUrl, track.title, track.artist) {
-        val url = track.artworkUrl?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+    LaunchedEffect(track.videoId, track.artworkUrl, track.title, track.artist, resolvedAmbientUrl) {
+        val url = resolvedAmbientUrl?.takeIf { it.isNotBlank() }
+            ?: ArtworkNormalizer.upscaleYoutubeArtwork(track.artworkUrl)?.takeIf { it.isNotBlank() }
+            ?: return@LaunchedEffect
         withContext(Dispatchers.IO) {
             runCatching {
                 val request = ImageRequest.Builder(context)
@@ -1974,14 +1947,6 @@ private fun FullPlayer(
                 )
                 if (showFullBleed) {
                     val density = LocalDensity.current
-                    // Dominant-derived solid the hero melts into. Darkened just enough
-                    // for white title/controls to stay legible while keeping hue,
-                    // so the eye can't find where art ends and background begins.
-                    val seamlessBase = androidx.compose.ui.graphics.lerp(
-                        ambientDeep,
-                        Color.Black,
-                        0.42f,
-                    )
                     // Square-capped hero: a tall container forces Crop to zoom and eat
                     // the sides (the "stretch"). Clamp measured height near square so
                     // side-crop stays minimal. Tall portrait canvas keeps full-page.
@@ -2000,45 +1965,29 @@ private fun FullPlayer(
                     val minPx = minOf(bgWidth * 0.92f, bgHeight * 0.50f)
                     val heroPx = measuredPx.coerceIn(minPx, maxPx).coerceAtLeast(1f)
                     val heroHeight = with(density) { heroPx.toDp() }
-                    // Melt foundation UNDER the hero: transparent where hero is opaque,
-                    // fully solid where hero has faded out. The hero's bottom overlay
-                    // fades toward exactly this colour, so there is never a hero-edge
-                    // line — just hue into hue.
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    0.00f to Color.Transparent,
-                                    0.30f to Color.Transparent,
-                                    0.50f to seamlessBase.copy(alpha = 0.55f),
-                                    0.62f to seamlessBase,
-                                    1.00f to seamlessBase,
-                                )
-                            )
-                    )
                     val lyricsCanvasBlurDp by animateDpAsState(
                         targetValue = if (currentTab == FullPlayerTab.LYRICS) 32.dp else 0.dp,
                         animationSpec = tween(350),
                         label = "lyricsCanvasBlur",
                     )
+                    // Canvas wins over the static cover - never both. The cover is only a
+                    // loading / decode-error placeholder, so once the motion canvas reports a
+                    // real rendered frame (CanvasArtworkPlayer sets rendered from
+                    // onSurfaceTextureUpdated, i.e. after pixels exist) the cover fades out and
+                    // leaves the tree entirely. Both fade from the same trigger, so this is a
+                    // true crossfade with no gap: the cover fades out here while
+                    // CanvasArtworkPlayer fades itself in over the same window.
                     val canvasCrossfadeAlpha by animateFloatAsState(
                         targetValue = if (activeCanvas != null && canvasRendered) 1f else 0f,
                         animationSpec = tween(400),
                         label = "canvasCrossfadeAlpha",
                     )
+                    val heroCoverAlpha = if (activeCanvas == null) 1f else 1f - canvasCrossfadeAlpha
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .fillMaxWidth()
                             .height(heroHeight)
-                            // No offscreen compositing strategy here on purpose. The melt
-                            // used to be a BlendMode.DstIn drawWithContent mask on an
-                            // Offscreen graphicsLayer, which wrapped the motion artwork
-                            // TextureView in two nested saveLayers and underflowed the
-                            // canvas save stack ("Underflow in restore - more restores
-                            // than saves") on some GPUs. The identical image is now a
-                            // plain source-over pass at the bottom of this Box.
                             .then(
                                 if (lyricsCanvasBlurDp > 0.dp) {
                                     Modifier.blur(lyricsCanvasBlurDp)
@@ -2047,14 +1996,47 @@ private fun FullPlayer(
                                 }
                             ),
                     ) {
-                        ArtworkImage(
-                            name = track.title,
-                            artist = track.artist,
-                            embeddedUrl = track.artworkUrl,
-                            fallbackIcon = Icons.Filled.MusicNote,
-                            alignment = Alignment.TopCenter,
-                            modifier = Modifier.fillMaxSize(),
-                        )
+                        // The cover art banner dissolves over its bottom HERO_FADE_FRACTION (42%)
+                        // into the underlying fluid/ambient backdrop via an offscreen DstIn blend mask.
+                        if (heroCoverAlpha > 0.001f) {
+                            ArtworkImage(
+                                name = track.title,
+                                artist = track.artist,
+                                embeddedUrl = track.artworkUrl,
+                                fallbackIcon = Icons.Filled.MusicNote,
+                                alignment = Alignment.TopCenter,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        alpha = heroCoverAlpha
+                                        compositingStrategy = CompositingStrategy.Offscreen
+                                    }
+                                    .drawWithContent {
+                                        drawContent()
+                                        drawRect(
+                                            brush = Brush.verticalGradient(
+                                                colors = listOf(Color.Black, Color.Transparent),
+                                                startY = size.height * (1f - HERO_FADE_FRACTION),
+                                                endY = size.height,
+                                            ),
+                                            blendMode = BlendMode.DstIn,
+                                        )
+                                    },
+                            )
+                        }
+                        if (activeCanvas != null) {
+                            CanvasArtworkPlayer(
+                                canvas = activeCanvas,
+                                isPlaying = state.isPlaying,
+                                contentMode = CanvasContentMode.CROP,
+                                alignPortraitTop = true,
+                                bottomFade = HERO_FADE_FRACTION,
+                                onAspectRatioChanged = { canvasAspect = it },
+                                onRenderedChanged = { canvasRendered = it },
+                                pausedForTransition = shownDismissY > 0f || currentTab != FullPlayerTab.NOW_PLAYING,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
                         // Top status bar vignette only (ensures system indicators remain legible over bright artwork)
                         Box(
                             modifier = Modifier
@@ -2065,49 +2047,6 @@ private fun FullPlayer(
                                         0.00f to Color.Black.copy(alpha = 0.35f),
                                         0.60f to Color.Black.copy(alpha = 0.12f),
                                         1.00f to Color.Transparent,
-                                    )
-                                )
-                        )
-                        if (activeCanvas != null) {
-                            CanvasArtworkPlayer(
-                                canvas = activeCanvas,
-                                isPlaying = state.isPlaying,
-                                contentMode = CanvasContentMode.CROP,
-                                alignPortraitTop = true,
-                                // Lower than before: outer hero mask + bottom tint now own
-                                // the melt. Higher values double-darken animated art.
-                                bottomFade = 0.30f,
-                                bottomFadeFallbackColor = seamlessBase.toArgb(),
-                                onAspectRatioChanged = { canvasAspect = it },
-                                onRenderedChanged = { canvasRendered = it },
-                                pausedForTransition = shownDismissY > 0f || currentTab != FullPlayerTab.NOW_PLAYING,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .graphicsLayer {
-                                        alpha = canvasCrossfadeAlpha
-                                    },
-                            )
-                        }
-                        // Melt + hue-tint in ONE source-over pass, replacing the old
-                        // BlendMode.DstIn mask. Alpha here is 1 - (old mask alpha) at the
-                        // exact same stop positions, painted toward the same seamlessBase
-                        // the artwork used to be erased into, so the rendered pixels are
-                        // unchanged — minus the offscreen RenderNode and saveLayer that
-                        // used to sit around the motion artwork TextureView.
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .fillMaxWidth()
-                                .height(heroHeight)
-                                .background(
-                                    Brush.verticalGradient(
-                                        0.00f to Color.Transparent,
-                                        0.52f to Color.Transparent,
-                                        0.66f to seamlessBase.copy(alpha = 0.08f),
-                                        0.78f to seamlessBase.copy(alpha = 0.34f),
-                                        0.88f to seamlessBase.copy(alpha = 0.70f),
-                                        0.95f to seamlessBase.copy(alpha = 0.92f),
-                                        1.00f to seamlessBase,
                                     )
                                 )
                         )
@@ -2938,10 +2877,16 @@ private fun SeekBar(
     val seekInteraction = remember(trackKey) { MutableInteractionSource() }
     val frameworkDragging by seekInteraction.collectIsDraggedAsState()
     var dragFraction by remember(trackKey) { mutableStateOf<Float?>(null) }
+    var lastSeekFraction by remember(trackKey) { mutableStateOf<Float?>(null) }
     // Heal a gesture that ended without the finished callback: drop the dead
-    // value, resume live position. Never seeks; commit is only below.
+    // value, resume live position. A brief delay ensures onValueChangeFinished
+    // runs and captures the target fraction first.
     LaunchedEffect(frameworkDragging, trackKey) {
-        if (!frameworkDragging) dragFraction = null
+        if (!frameworkDragging) {
+            delay(120L)
+            dragFraction = null
+            lastSeekFraction = null
+        }
     }
 
     val boundedDurationMs = effectiveDurationMs.coerceAtLeast(0L)
@@ -3035,13 +2980,17 @@ private fun SeekBar(
             // Invisible Material interaction layer: custom visuals, reliable seeking semantics.
             Slider(
                 value = fraction,
-                onValueChange = { dragFraction = it },
+                onValueChange = {
+                    dragFraction = it
+                    lastSeekFraction = it
+                },
                 onValueChangeFinished = {
                     // Commit only this gesture's value; no value = no seek.
-                    val target = dragFraction?.let {
+                    val target = (lastSeekFraction ?: dragFraction)?.let {
                         (it * boundedDurationMs).toLong().coerceIn(0L, boundedDurationMs)
                     }
                     dragFraction = null
+                    lastSeekFraction = null
                     if (target != null && boundedDurationMs > 0L) {
                         onSeek(target)
                     }
@@ -3839,22 +3788,38 @@ private fun PlayerArtwork(
     transformations: List<coil.transform.Transformation> = emptyList(),
     onAspectRatioChanged: (Float) -> Unit = {},
 ) {
+    // Same rule as the full-bleed hero: the canvas is the artwork, the static cover is
+    // only a loading / decode-error placeholder. Crossfade the cover out and drop it
+    // from the tree once the canvas has actually rendered, so the two are never both
+    // visible. With canvas == null this is exactly the old static-only behaviour.
+    var canvasRendered by remember(canvas?.url) { mutableStateOf(false) }
+    val canvasAlpha by animateFloatAsState(
+        targetValue = if (canvas != null && canvasRendered) 1f else 0f,
+        animationSpec = tween(400),
+        label = "sleeveCanvasAlpha",
+    )
+    val coverAlpha = if (canvas == null) 1f else 1f - canvasAlpha
     Box(modifier.clip(RoundedCornerShape(corner)).background(MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) {
-        ArtworkImage(
-            name = track.title,
-            artist = track.artist,
-            embeddedUrl = track.artworkUrl,
-            fallbackIcon = Icons.Filled.MusicNote,
-            modifier = Modifier.fillMaxSize(),
-            decodeSizePx = decodeSizePx,
-            transformations = transformations,
-        )
+        if (coverAlpha > 0.001f) {
+            ArtworkImage(
+                name = track.title,
+                artist = track.artist,
+                embeddedUrl = track.artworkUrl,
+                fallbackIcon = Icons.Filled.MusicNote,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = coverAlpha },
+                decodeSizePx = decodeSizePx,
+                transformations = transformations,
+            )
+        }
         if (canvas != null) {
             CanvasArtworkPlayer(
                 canvas = canvas,
                 isPlaying = isPlaying,
                 pausedForTransition = pausedForTransition,
                 onAspectRatioChanged = onAspectRatioChanged,
+                onRenderedChanged = { canvasRendered = it },
                 contentMode = CanvasContentMode.CROP,
                 modifier = Modifier.fillMaxSize(),
             )

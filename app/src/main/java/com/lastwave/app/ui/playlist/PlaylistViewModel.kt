@@ -77,6 +77,7 @@ class PlaylistViewModel @Inject constructor(
     private val ytMusicLibraryManager: com.lastwave.app.data.ytmusic.YtMusicLibraryManager,
     private val trackDownloadManager: com.lastwave.app.data.download.TrackDownloadManager,
     private val innerTubeApi: com.lastwave.app.data.music.InnerTubeMusicApi,
+    private val routeNavigator: com.lastwave.app.ui.navigation.AppRouteNavigator,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PlaylistUiState())
@@ -458,18 +459,21 @@ class PlaylistViewModel @Inject constructor(
     fun confirmDelete() {
         val id = _uiState.value.deleteConfirmForPlaylistId ?: return
         viewModelScope.launch {
-            val playlist = playlistRepository.getById(id)
-            if (playlist != null && (playlist.isYouTubeOnly || playlist.remotePlaylistId != null)) {
-                val ytId = if (playlist.isYouTubeOnly) playlist.id.toString() else playlist.remotePlaylistId
+            val playlist = _uiState.value.playlists.find { it.id == id }
+            if (playlist != null) {
+                val ytId = playlist.remotePlaylistId
                 if (ytId != null) {
                     try {
-                        innerTubeApi.deleteRemotePlaylist(ytId)
+                        val actualId = if (ytId.startsWith("VL")) ytId.drop(2) else ytId
+                        innerTubeApi.deleteRemotePlaylist(actualId)
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
                 }
             }
-            playlistRepository.delete(id)
+            if (id >= 0L) {
+                playlistRepository.delete(id)
+            }
             _uiState.update { it.copy(deleteConfirmForPlaylistId = null) }
             load()
         }
@@ -478,18 +482,21 @@ class PlaylistViewModel @Inject constructor(
     fun deleteMultiple(ids: Set<Long>) {
         viewModelScope.launch {
             for (id in ids) {
-                val playlist = playlistRepository.getById(id)
-                if (playlist != null && (playlist.isYouTubeOnly || playlist.remotePlaylistId != null)) {
-                    val ytId = if (playlist.isYouTubeOnly) playlist.id.toString() else playlist.remotePlaylistId
+                val playlist = _uiState.value.playlists.find { it.id == id }
+                if (playlist != null) {
+                    val ytId = playlist.remotePlaylistId
                     if (ytId != null) {
                         try {
-                            innerTubeApi.deleteRemotePlaylist(ytId)
+                            val actualId = if (ytId.startsWith("VL")) ytId.drop(2) else ytId
+                            innerTubeApi.deleteRemotePlaylist(actualId)
                         } catch (e: Exception) {
                             e.printStackTrace()
                         }
                     }
                 }
-                playlistRepository.delete(id)
+                if (id >= 0L) {
+                    playlistRepository.delete(id)
+                }
             }
             load()
         }
@@ -593,6 +600,9 @@ class PlaylistViewModel @Inject constructor(
                         else -> "All songs already downloaded"
                     },
                 )
+            }
+            if (queued > 0) {
+                routeNavigator.navigateTo(com.lastwave.app.ui.navigation.Screen.Downloads.route)
             }
         }
     }

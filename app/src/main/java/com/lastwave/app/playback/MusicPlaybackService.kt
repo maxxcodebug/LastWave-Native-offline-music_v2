@@ -98,11 +98,17 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     // SupervisorJob stops sibling failure propagation; the handler below
     // additionally stops an unexpected exception in any fire-and-forget
     // launch (scrobble, artwork, notification publish) from reaching the
-    // default handler and killing the whole process mid-playback.
+    // default handler and killing the whole process mid-playback. These are
+    // swallowed on purpose — but they still reach the on-disk log, so a
+    // repeatedly failing subsystem is visible instead of invisible.
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Main.immediate +
             CoroutineExceptionHandler { _, error ->
-                android.util.Log.e("MusicPlaybackService", "Suppressed playback service coroutine failure", error)
+                com.lastwave.app.diagnostics.AppLog.e(
+                    "MusicPlaybackService",
+                    "Suppressed playback service coroutine failure",
+                    error,
+                )
             },
     )
     // A handful of ROMs ship broken or deliberately crippled media-session
@@ -566,6 +572,9 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     override fun onDestroy() {
         runCatching { if (playbackWakeLock?.isHeld == true) playbackWakeLock?.release() }
         runCatching { if (playbackWifiLock?.isHeld == true) playbackWifiLock?.release() }
+        // The service is the last thing standing in a playback-only session, so
+        // this is the last chance to get buffered log records onto disk.
+        com.lastwave.app.diagnostics.AppLog.flush()
         detectorJob?.cancel()
         artworkJob?.cancel()
         if (isPlaybackForeground) {
@@ -978,20 +987,29 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         artworkUrl = null
         artworkJob?.cancel()
 
-        val directUrl = track.artworkUrl?.takeIf(String::isNotBlank)
-        if (directUrl != null) {
-            fetchArtwork(directUrl)
-            return
-        }
-
-        // If track artwork is missing (e.g. from lists/generator), resolve via ArtworkRepository
         val key = com.lastwave.app.data.artwork.ArtworkNormalizer.cacheKey(track.title, track.artist)
         val cached = artworkRepository.resolved.value[key]?.takeIf(String::isNotBlank)
         if (cached != null) {
             fetchArtwork(cached)
-        } else {
-            scope.launch(Dispatchers.IO) {
-                artworkRepository.resolve(track.title, track.artist)
+            return
+        }
+
+        // Show immediate upscaled placeholder while high-res artwork resolves
+        val placeholder = com.lastwave.app.data.artwork.ArtworkNormalizer.upscaleYoutubeArtwork(track.artworkUrl)?.takeIf(String::isNotBlank)
+        if (placeholder != null) {
+            fetchArtwork(placeholder)
+        }
+
+        // Resolve high-resolution master artwork (Spotify -> Apple Music -> Tidal -> Deezer) in background
+        scope.launch(Dispatchers.IO) {
+            artworkRepository.resolve(track.title, track.artist)
+            val resolved = artworkRepository.resolved.value[key]?.takeIf(String::isNotBlank)
+            if (resolved != null && resolved != artworkUrl) {
+                withContext(Dispatchers.Main) {
+                    if (artworkRequestKey == requestKey) {
+                        fetchArtwork(resolved)
+                    }
+                }
             }
         }
     }

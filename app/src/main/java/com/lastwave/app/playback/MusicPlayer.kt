@@ -359,6 +359,25 @@ class MusicPlayer @Inject constructor(
     private var overlapDurationMs = 0L
     private var standbyQueue: List<MediaItem> = emptyList()
     private var standbyIndex = C.INDEX_UNSET
+    /**
+     * True once the standby holds the upcoming queue and is preparing it, i.e.
+     * [standbyIndex] / [standbyQueue] are live. Cleared by [cancelCrossfade]
+     * and by the hand-off.
+     */
+    @Volatile private var crossfadeStandbyArmed = false
+    /**
+     * True while an armed standby has not reached STATE_READY yet, so the
+     * current-track downloader yields the connection. Only large lossless files
+     * ran long enough to compete for bandwidth, which is why this never showed
+     * up with Opus. Narrower than [crossfadeStandbyArmed] on purpose: once the
+     * standby is buffered, background caching of the outgoing track resumes.
+     */
+    @Volatile private var crossfadeStandbyPreparing = false
+    /** Spacing for next-track resolve kicks, so a failing module is not hammered. */
+    private var lastCrossfadeResolveKickMs = 0L
+    private var lastCrossfadeResolveIndex = C.INDEX_UNSET
+    private var lastCrossfadeLogKey: String? = null
+    private var lastCrossfadeLogAtMs = 0L
     private val _state = MutableStateFlow(MusicPlayerState())
     val state: StateFlow<MusicPlayerState> = _state.asStateFlow()
     val chromeState: StateFlow<PlaybackChromeState> = state
@@ -480,6 +499,16 @@ class MusicPlayer @Inject constructor(
      * player duration once learned) keeps progress + seek alive from t=0.
      */
     private val knownDurations = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Media id of the item that produced the currently published
+     * [MusicPlayerState.durationMs]. A published duration is only reusable while
+     * this still matches the item playing: without it, the outgoing track's
+     * length became the incoming track's seek-bar ceiling *and* its crossfade
+     * timer, which handed off to the next item seconds into a full-length track.
+     * Written and read on the main thread alongside the state it describes.
+     */
+    private var durationOwnerMediaId: String? = null
 
     private val mediaCache: Cache by lazy {
         val cacheDir = java.io.File(appContext.cacheDir, "media_stream_cache")
@@ -997,7 +1026,12 @@ class MusicPlayer @Inject constructor(
                     exclusiveUsb = if (handleAudioFocus) exclusiveUsbOutput else null,
                 ).also { sink ->
                     sink.onConfiguredFormat = { rateHz, _, _ ->
-                        onDecodedPcmFormatConfigured(rateHz)
+                        // The crossfade standby arms early and configures its
+                        // sink while the OUTGOING track is still the live one.
+                        // Only the active player may publish sample rate and
+                        // re-settle bit-perfect/system volume, otherwise the
+                        // next track's rate lands on the current track's pill.
+                        if (handleAudioFocus) onDecodedPcmFormatConfigured(rateHz)
                     }
                     sink.bitDepthHintProvider = {
                         val s = _state.value
@@ -1326,7 +1360,7 @@ class MusicPlayer @Inject constructor(
                             updateCrossfade(player.currentPosition.coerceAtLeast(0L))
                             cadenceMs = 50L
                         }
-                        if (player.currentMediaItem?.mediaId != _state.value.current?.mediaIdKey()) {
+                        if (!isCurrentMediaMatch(player, _state.value.current)) {
                             _state.update { it.copy(sleepTimerRemainingMs = remaining?.coerceAtLeast(0)) }
                             cadenceMs = 60L
                         } else {
@@ -1671,6 +1705,7 @@ class MusicPlayer @Inject constructor(
                     durationMs = selectedTrack.durationMs ?: findKnownDuration(selectedTrack) ?: 0L,
                     sourceLabel = sourceLabel, isEndlessQueue = endlessDiscover,
                     shuffleEnabled = startShuffled, error = null)
+                durationOwnerMediaId = selectedTrack.mediaIdKey()
                 castPlayback?.load(_state.value)
             }
             return
@@ -1710,6 +1745,7 @@ class MusicPlayer @Inject constructor(
                 shuffleEnabled = if (playerDelegate.isInitialized()) player.shuffleModeEnabled else startShuffled,
                 repeatMode = player.repeatMode,
             )
+            durationOwnerMediaId = selectedTrack.mediaIdKey()
             persistPlaybackSession()
         }
         playRequest = applicationScope.launch(Dispatchers.IO) {
@@ -2114,6 +2150,41 @@ class MusicPlayer @Inject constructor(
         return playheadPosMs.coerceAtLeast(0L)
     }
 
+    private fun isCurrentMediaMatch(player: Player, expected: PlayableTrack?): Boolean {
+        if (expected == null) return false
+        val currentItem = runCatching { player.currentMediaItem }.getOrNull() ?: return false
+        val itemMediaId = currentItem.mediaId
+        val expectedKey = expected.mediaIdKey()
+        if (itemMediaId == expectedKey) return true
+
+        val expectedVideoId = expected.videoId?.takeIf { it.isNotBlank() }
+        if (expectedVideoId != null) {
+            if (itemMediaId == expectedVideoId) return true
+            if (itemMediaId.removePrefix("local:") == expectedVideoId) return true
+        }
+
+        val expectedPlaybackUrl = expected.playbackUrl?.takeIf { it.isNotBlank() }
+        if (expectedPlaybackUrl != null) {
+            if (itemMediaId == expectedPlaybackUrl || itemMediaId == "local:$expectedPlaybackUrl") return true
+            if (itemMediaId.removePrefix("local:") == expectedPlaybackUrl) return true
+            val uriStr = currentItem.localConfiguration?.uri?.toString()
+            if (uriStr == expectedPlaybackUrl || uriStr == "file://$expectedPlaybackUrl") return true
+        }
+
+        val itemTitle = currentItem.mediaMetadata.title?.toString()
+        val itemArtist = currentItem.mediaMetadata.artist?.toString()
+        if (!itemTitle.isNullOrBlank() && itemTitle.equals(expected.title, ignoreCase = true)) {
+            if (itemArtist.isNullOrBlank() || expected.artist.isBlank() || itemArtist.equals(expected.artist, ignoreCase = true)) {
+                return true
+            }
+        }
+
+        val queryKey = "query:${expected.artist.lowercase()}|${expected.title.lowercase()}"
+        if (itemMediaId == queryKey) return true
+
+        return false
+    }
+
     /**
      * Accurate audio playhead clock.
      * In standard playback, aligns with ExoPlayer's true hardware audio presentation position
@@ -2146,7 +2217,7 @@ class MusicPlayer @Inject constructor(
         }
         if (!exclusiveUsbOutput.isActive() && playerDelegate.isInitialized()) {
             val playbackState = player.playbackState
-            val currentMediaMatch = player.currentMediaItem?.mediaId == _state.value.current?.mediaIdKey()
+            val currentMediaMatch = isCurrentMediaMatch(player, _state.value.current)
             if (currentMediaMatch && (playbackState == Player.STATE_READY || playbackState == Player.STATE_BUFFERING)) {
                 val exoPos = player.currentPosition.coerceAtLeast(0L)
                 if (playbackState == Player.STATE_BUFFERING && playheadPosMs == 0L && exoPos > 1_500L) {
@@ -2164,6 +2235,21 @@ class MusicPlayer @Inject constructor(
                 playheadMoving = false
                 return dur
             }
+            // IDLE, or the player is still holding the previous item while the
+            // queue has already moved on. Nothing is rendering, so the playhead
+            // must not fall through to the wall clock below: that clock keeps
+            // counting whenever _state.isPlaying is true, and it is held true on
+            // purpose across resolve/buffer windows so a locked screen does not
+            // drop its wake lock. The two together made the seek bar run
+            // forward through a stall or a track transition - the "playing while
+            // buffering" report. Freeze here instead; the real position resumes
+            // as soon as the item matches again.
+            //
+            // USB-exclusive output is excluded above and keeps its own stream
+            // clock, so bit-perfect playback is untouched by this.
+            playheadMoving = false
+            playheadWallMs = now
+            return playheadPosMs
         }
         if (!playing) {
             if (playheadMoving) {
@@ -2206,6 +2292,9 @@ class MusicPlayer @Inject constructor(
 
     @MainThread
     private fun cancelCrossfade() {
+        crossfadeStandbyArmed = false
+        crossfadeStandbyPreparing = false
+        lastCrossfadeLogKey = null
         if (!playerDelegate.isInitialized()) return
         outgoingPlayer = null
         val standby = if (player === secondaryPlayer) playerDelegate.value else secondaryPlayer
@@ -2214,6 +2303,69 @@ class MusicPlayer @Inject constructor(
         standbyQueue = emptyList()
         standbyIndex = C.INDEX_UNSET
         player.volume = 1f
+    }
+
+    /**
+     * The standby player without creating one. Never forces the lazy primary:
+     * when [player] IS the secondary the primary was necessarily built first.
+     */
+    private fun currentStandby(): ExoPlayer? =
+        if (player === secondaryPlayer) {
+            playerDelegate.value.takeIf { playerDelegate.isInitialized() }
+        } else {
+            secondaryPlayer
+        }
+
+    /** Builds the standby on first crossfade; afterwards it is reused and swapped. */
+    @MainThread
+    private fun standbyOrCreate(): ExoPlayer = currentStandby() ?: run {
+        val engine = NativeAudioEngine(settingsPreferences, equalizerPreferences, applicationScope)
+        val effects = AudioEffectsEngine(equalizerPreferences, settingsPreferences, applicationScope)
+        secondaryNativeEngine = engine
+        secondaryEffects = effects
+        createPlayer({ engine }, effects, false).also { secondaryPlayer = it }
+    }
+
+    /**
+     * Installs the current queue on the standby and lets it prepare, so the next
+     * track spends the rest of this one buffering. Runs as soon as the next item
+     * is resolved instead of at the edge of the fade window: with short-TTL
+     * module/addon FLAC URLs the old inside-the-window arm left no time to
+     * resolve, prepare and buffer, and every such fade became a hard cut.
+     * Re-armed automatically when the item at [nextIndex] is replaced (a TTL
+     * refresh swaps it), and torn down by [cancelCrossfade] on every queue edit.
+     */
+    @MainThread
+    private fun armCrossfadeStandby(nextIndex: Int, nextItem: MediaItem) {
+        val standby = standbyOrCreate()
+        standbyQueue = (0 until player.mediaItemCount).map(player::getMediaItemAt)
+        standbyIndex = nextIndex
+        standby.volume = 0f
+        standby.setAudioAttributes(player.audioAttributes, false)
+        standby.pause()
+        standby.setMediaItems(standbyQueue, nextIndex, 0L)
+        standby.prepare()
+        crossfadeStandbyArmed = true
+        crossfadeStandbyPreparing = true
+        logCrossfadeDecision(
+            "armed",
+            "index=$nextIndex track='${nextItem.mediaMetadata.title}'",
+        )
+    }
+
+    /**
+     * One line per crossfade decision, rate-limited per key. Only the hand-off
+     * used to log, which is why a missed fade was indistinguishable from a
+     * disabled one; the armed/waiting states repeat on every 60ms tick and must
+     * not flood logcat.
+     */
+    @MainThread
+    private fun logCrossfadeDecision(key: String, detail: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (lastCrossfadeLogKey == key && now - lastCrossfadeLogAtMs < CROSSFADE_LOG_THROTTLE_MS) return
+        lastCrossfadeLogKey = key
+        lastCrossfadeLogAtMs = now
+        android.util.Log.i("MusicPlayer", "Crossfade[$key]: $detail")
     }
 
     @MainThread
@@ -2239,72 +2391,120 @@ class MusicPlayer @Inject constructor(
         // container duration alone means TIME_UNSET streams (YouTube WebM/MP4
         // takes 30-40s to parse) never arm. Fall back to the seeded /
         // resolve-time duration also used by the progress bar.
+        //
+        // A window opened off a duration that belongs to ANOTHER track is worse
+        // than no window at all: `remaining` crosses its threshold seconds into
+        // a full-length track and the hand-off abandons the rest of it. So
+        // effectiveDuration returns 0 here rather than the outgoing track's
+        // length, and this track simply idles until its own duration is known.
         val timingDurationMs = player.duration.takeIf { it > 0L }
             ?: effectiveDuration(player.duration, player, _state.value.durationMs).takeIf { it > 0L }
             ?: return false
         val nextIndex = player.nextMediaItemIndex
-        if (nextIndex == C.INDEX_UNSET || nextIndex == player.currentMediaItemIndex) return false
+        val hasNext = nextIndex != C.INDEX_UNSET &&
+            nextIndex != player.currentMediaItemIndex &&
+            nextIndex in 0 until player.mediaItemCount
+        val nextItem = if (hasNext) player.getMediaItemAt(nextIndex) else null
+        val stream = nextItem?.localConfiguration?.customCacheKey?.let(preparedStreams::get)
         val livePosMs = runCatching { player.currentPosition.coerceAtLeast(0L) }.getOrDefault(0L)
             .takeIf { it > 0L } ?: positionMs.coerceAtLeast(0L)
-        val fadeMs = minOf((crossfadeDurationMs * player.playbackParameters.speed).toLong(), timingDurationMs / 3)
-        if (fadeMs <= 0L) return false
-        val remainingMs = timingDurationMs - livePosMs
-        if (remainingMs <= 0L || remainingMs > fadeMs + CROSSFADE_ARM_LEAD_MS) return false
-        val nextItem = player.getMediaItemAt(nextIndex)
-        if (nextItem.localConfiguration?.uri?.scheme == "lastwave") {
-            // The next track hasn't been resolved yet (slow or failed
-            // preload). Giving up here turns every such fade into a hard
-            // cut at track end — with slow lossless backends that is most
-            // fades. Kick an in-place resolve and retry on later ticks
-            // instead. Throttled: re-kicking every tick would restart the
-            // preload delay loop forever and resolve nothing.
-            if (preloadJob?.isActive != true) {
-                android.util.Log.i(
-                    "MusicPlayer",
-                    "Crossfade: next item still a placeholder, (re)kicking preload for index $nextIndex",
-                )
-                preloadNextTrack(nextIndex, nextItem.toPlayableTrack())
-            }
-            return false
-        }
-        val stream = nextItem.localConfiguration?.customCacheKey?.let(preparedStreams::get)
-        if (stream?.isExpired() == true) {
-            if (preloadJob?.isActive != true) {
-                preloadNextTrack(nextIndex, nextItem.toPlayableTrack())
-            }
-            return false
-        }
+        // Pure state only: never materializes the standby just to ask whether it
+        // is already armed, which would build a second player on the first tick
+        // of every track.
+        val armedForNext = crossfadeStandbyArmed && standbyIndex == nextIndex &&
+            standbyQueue.size == player.mediaItemCount &&
+            standbyQueue.getOrNull(nextIndex) == nextItem
+        val standby = currentStandby()
 
-        val standby = if (player === secondaryPlayer) playerDelegate.value else {
-            secondaryPlayer ?: run {
-                val engine = NativeAudioEngine(settingsPreferences, equalizerPreferences, applicationScope)
-                val effects = AudioEffectsEngine(equalizerPreferences, settingsPreferences, applicationScope)
-                secondaryNativeEngine = engine
-                secondaryEffects = effects
-                createPlayer({ engine }, effects, false).also { secondaryPlayer = it }
+        val plan = planCrossfade(
+            CrossfadePlanInput(
+                crossfadeEnabled = true,
+                bitPerfectEnabled = false,
+                isPlaying = player.isPlaying,
+                repeatOne = player.repeatMode == Player.REPEAT_MODE_ONE,
+                durationMs = timingDurationMs,
+                positionMs = livePosMs,
+                crossfadeMs = crossfadeDurationMs,
+                playbackSpeed = player.playbackParameters.speed,
+                hasNextItem = hasNext,
+                nextItemResolved = nextItem?.localConfiguration?.uri?.scheme != "lastwave",
+                streamExpired = stream?.isExpired() == true,
+                standbyArmedForNext = armedForNext,
+                standbyReady = armedForNext && standby?.playbackState == Player.STATE_READY,
+                standbyDurationMs = if (armedForNext) standby?.duration ?: 0L else 0L,
+                standbyBufferedMs = if (armedForNext) {
+                    runCatching { standby?.bufferedPosition ?: 0L }.getOrDefault(0L)
+                } else {
+                    0L
+                },
+                armLeadMs = CROSSFADE_ARM_LEAD_MS,
+                refreshLeadMs = CROSSFADE_PREP_REFRESH_LEAD_MS,
+            ),
+        )
+
+        when (plan) {
+            is CrossfadeDecision.Idle -> return false
+
+            is CrossfadeDecision.ResolveNext -> {
+                // Unresolved or dead-signed next item. Refreshing early
+                // (CROSSFADE_PREP_REFRESH_LEAD_MS) instead of at the window edge
+                // is what lets provider-module FLAC actually blend.
+                //
+                // A module that keeps failing must not be re-requested on every
+                // tick, so kicks are spaced by CROSSFADE_RESOLVE_RETRY_MS and
+                // re-armed whenever the target index changes.
+                val nowMs = SystemClock.elapsedRealtime()
+                val dueForKick = lastCrossfadeResolveIndex != nextIndex ||
+                    nowMs - lastCrossfadeResolveKickMs >= CROSSFADE_RESOLVE_RETRY_MS
+                logCrossfadeDecision(
+                    plan.reason.name.lowercase(),
+                    "index=$nextIndex remaining=${timingDurationMs - livePosMs}ms " +
+                        "inFlight=${preloadJob?.isActive == true} dueForKick=$dueForKick",
+                )
+                if (dueForKick && preloadJob?.isActive != true) {
+                    lastCrossfadeResolveIndex = nextIndex
+                    lastCrossfadeResolveKickMs = nowMs
+                    preloadNextTrack(nextIndex, nextItem?.toPlayableTrack())
+                }
+                return false
+            }
+
+            CrossfadeDecision.Arm -> {
+                if (nextItem != null) armCrossfadeStandby(nextIndex, nextItem)
+                return false
+            }
+
+            CrossfadeDecision.WaitingForReady -> {
+                logCrossfadeDecision(
+                    "waiting-ready",
+                    "remaining=${timingDurationMs - livePosMs}ms state=${standby?.playbackState} " +
+                        "buffered=${standby?.bufferedPosition}ms",
+                )
+                return false
+            }
+
+            CrossfadeDecision.WaitingForWindow -> {
+                // Buffered: let the outgoing track's background caching resume.
+                crossfadeStandbyPreparing = false
+                return false
+            }
+
+            is CrossfadeDecision.HandOff -> {
+                if (standby == null || nextItem == null) return false
+                // A queue edit during preparation must never start a stale next track.
+                if (standbyQueue.indices.any { standbyQueue[it] != player.getMediaItemAt(it) }) {
+                    cancelCrossfade()
+                    return false
+                }
+                handOffCrossfade(standby, plan.overlapMs)
+                return true
             }
         }
-        if (standbyIndex != nextIndex || standbyQueue.size != player.mediaItemCount ||
-            standbyQueue.getOrNull(nextIndex) != nextItem
-        ) {
-            standbyQueue = (0 until player.mediaItemCount).map(player::getMediaItemAt)
-            standbyIndex = nextIndex
-            standby.volume = 0f
-            standby.setAudioAttributes(player.audioAttributes, false)
-            standby.pause()
-            standby.setMediaItems(standbyQueue, nextIndex, 0L)
-            standby.prepare()
-        }
-        // Two stages: arm early so the standby buffers, hand off only inside
-        // the fade window once it is READY. This is what makes slow lossless
-        // resolves still blend instead of missing the window.
-        if (remainingMs > fadeMs) return false
-        if (standby.playbackState != Player.STATE_READY) return false
-        // A queue edit during preparation must never start a stale next track.
-        if (standbyQueue.indices.any { standbyQueue[it] != player.getMediaItemAt(it) }) {
-            cancelCrossfade()
-            return false
-        }
+    }
+
+    /** Swaps the standby in as the active player and starts the blend. */
+    @MainThread
+    private fun handOffCrossfade(standby: ExoPlayer, overlapMs: Long) {
         val outgoing = player
         val shuffleOrder = mutableListOf<Int>()
         val timeline = outgoing.currentTimeline
@@ -2317,8 +2517,7 @@ class MusicPlayer @Inject constructor(
         standby.shuffleModeEnabled = outgoing.shuffleModeEnabled
         standby.repeatMode = outgoing.repeatMode
         standby.playbackParameters = outgoing.playbackParameters
-        overlapDurationMs = minOf(fadeMs, remainingMs,
-            standby.duration.takeIf { it > 0L }?.div(3) ?: fadeMs).coerceAtLeast(1L)
+        overlapDurationMs = overlapMs
         outgoing.volume = 1f
         standby.volume = 0f
         outgoing.removeListener(listener)
@@ -2331,6 +2530,11 @@ class MusicPlayer @Inject constructor(
         standby.addListener(listener)
         standby.setAudioAttributes(standby.audioAttributes, true)
         standby.play()
+        // The standby is now the live player; the outgoing one is the next
+        // standby. Cleared so the downloader resumes caching the new track.
+        crossfadeStandbyArmed = false
+        crossfadeStandbyPreparing = false
+        lastCrossfadeLogKey = null
         android.util.Log.i(
             "MusicPlayer",
             "Crossfade: handing off '${outgoing.currentMediaItem?.mediaMetadata?.title}' -> " +
@@ -2338,7 +2542,6 @@ class MusicPlayer @Inject constructor(
         )
         listener.onMediaItemTransition(standby.currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
         refresh(standby)
-        return true
     }
 
     private fun updateBitPerfectState() {
@@ -3586,7 +3789,14 @@ class MusicPlayer @Inject constructor(
             delay(NEXT_TRACK_PREFETCH_DELAY_MS * 2) // slightly after +1
             if (!_state.value.isPlaying) return@launch
             val resolved = runCatching {
-                resolveTrackAudioStreamWithRetry(track, track.videoId, allowLossless = true)
+                resolveTrackAudioStreamWithRetry(
+                    track,
+                    track.videoId,
+                    allowLossless = true,
+                    // Background prefetch: nobody is waiting on audio, so the
+                    // lossless branch may take as long as the module needs.
+                    losslessBudget = LosslessBudget.Unbounded,
+                )
             }.getOrNull() ?: return@launch
             withContext(Dispatchers.Main.immediate) {
                 val q = (if (index in 0 until player.mediaItemCount) player.getMediaItemAt(index).toPlayableTrack() else null)
@@ -3609,9 +3819,17 @@ class MusicPlayer @Inject constructor(
             if (!_state.value.isPlaying) return@launch
             // WithRetry acquires the resolution wake lock so a locked screen
             // can't stall the next-track resolve, and retries once on
-            // transient IO (4.0.0 behavior). Still lossless-first.
+            // transient IO (4.0.0 behavior). Still lossless-first, and
+            // unbounded: this track is not playing yet, so the 3.5s
+            // interactive cap would only hand the crossfade standby an
+            // Opus stream instead of the requested lossless one.
             val resolved = runCatching {
-                resolveTrackAudioStreamWithRetry(nextTrack, nextTrack.videoId, allowLossless = true)
+                resolveTrackAudioStreamWithRetry(
+                    nextTrack,
+                    nextTrack.videoId,
+                    allowLossless = true,
+                    losslessBudget = LosslessBudget.Unbounded,
+                )
             }.onFailure { logResolutionFailure(nextTrack, "next-preload", 0, it) }
                 .getOrNull() ?: return@launch
 
@@ -3692,6 +3910,16 @@ class MusicPlayer @Inject constructor(
             var offset = 0L
             while (isActive) {
                 currentCoroutineContext().ensureActive()
+                // An armed crossfade standby needs the pipe to reach STATE_READY.
+                // Yield while it holds the upcoming queue rather than
+                // cancelling, so no progress is lost and caching resumes after
+                // the hand-off. Only files big enough to still be downloading
+                // at the fade ever hit this, which is why Opus never showed the
+                // starvation that made lossless fades fail.
+                if (crossfadeStandbyPreparing) {
+                    delay(CURRENT_TRACK_CACHE_STANDBY_YIELD_MS)
+                    continue
+                }
                 // Skip windows ExoPlayer already cached while playing so we
                 // extend ahead of playback instead of re-downloading it.
                 var skippedWindows = 0
@@ -4409,7 +4637,7 @@ class MusicPlayer @Inject constructor(
             stalledWindow != C.INDEX_UNSET &&
             stalledWindow in 0 until player.mediaItemCount &&
             mediaId != null &&
-            mediaId == snapshot.current?.mediaIdKey() &&
+            isCurrentMediaMatch(player, snapshot.current) &&
             player.playbackState != Player.STATE_ENDED
         // Null mediaId can't smart-cast through the flag above; re-check
         // here so the recovery call below type-checks.
@@ -4473,7 +4701,7 @@ class MusicPlayer @Inject constructor(
     private fun recoverSilentAdvance(index: Int, mediaId: String) {
         if (isCasting) return
         if (!playerDelegate.isInitialized() || index !in 0 until player.mediaItemCount) return
-        if (_state.value.current?.mediaIdKey() != mediaId || !_state.value.isPlaying || _state.value.error != null) return
+        if (!isCurrentMediaMatch(player, _state.value.current) || !_state.value.isPlaying || _state.value.error != null) return
         if (silentRecoveries.size > 64) silentRecoveries.clear()
         val attempt = (silentRecoveries[mediaId] ?: 0) + 1
         if (attempt > MAX_SILENT_RECOVERIES) return
@@ -4948,15 +5176,38 @@ class MusicPlayer @Inject constructor(
         return null
     }
 
+    /**
+     * How long the lossless / provider-module branch may run before playback
+     * falls back to YouTube.
+     */
+    private enum class LosslessBudget {
+        /**
+         * Interactive playback: give up quickly so the user hears *something*.
+         * The module chain is several round trips (up to four searches plus a
+         * stream fetch per quality tier), so this regularly expires on slow
+         * links — which is the right trade when a track is already playing.
+         */
+        Interactive,
+
+        /**
+         * Background preload: nobody is waiting on audio, so never time out.
+         * A 3.5s cap made the next track settle on the Opus stream instead of
+         * the requested FLAC, or on nothing at all, which is why the crossfade
+         * standby was still unprepared when its window opened.
+         */
+        Unbounded,
+    }
+
     private suspend fun resolveTrackAudioStream(
         track: PlayableTrack,
         videoId: String?,
         allowLossless: Boolean = true,
         excludedLosslessUrls: Set<String> = emptySet(),
         allowLocalDownloads: Boolean = true,
+        losslessBudget: LosslessBudget = LosslessBudget.Interactive,
     ): ResolvedStream = withContext(Dispatchers.IO) {
         val misc = runCatching { settingsPreferences.settings.first() }.getOrDefault(MiscSettings())
-        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.dolbyAtmosEnabled, misc.preferLosslessStreaming, misc.preferProviderModules, excludedLosslessUrls, allowLocalDownloads)
+        val key = listOf(track.title, track.artist, track.album, videoId, allowLossless, misc.losslessQuality, misc.dolbyAtmosEnabled, misc.preferLosslessStreaming, misc.preferProviderModules, excludedLosslessUrls, allowLocalDownloads, losslessBudget)
         val now = SystemClock.elapsedRealtime()
         resolutionRequests.entries.removeIf { now - it.value.first > 60_000L }
         if (resolutionRequests.size >= 64) {
@@ -4964,7 +5215,7 @@ class MusicPlayer @Inject constructor(
         }
         val request = resolutionRequests.computeIfAbsent(key) {
             now to applicationScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
-                resolveRemoteTrackAudioStream(track, videoId, allowLossless, misc, excludedLosslessUrls, allowLocalDownloads)
+                resolveRemoteTrackAudioStream(track, videoId, allowLossless, misc, excludedLosslessUrls, allowLocalDownloads, losslessBudget)
             }
         }
         try {
@@ -4986,6 +5237,7 @@ class MusicPlayer @Inject constructor(
         misc: MiscSettings,
         excludedLosslessUrls: Set<String>,
         allowLocalDownloads: Boolean = true,
+        losslessBudget: LosslessBudget = LosslessBudget.Interactive,
     ): ResolvedStream {
         val wantLossless = allowLossless &&
             misc.preferLosslessStreaming &&
@@ -5079,7 +5331,12 @@ class MusicPlayer @Inject constructor(
                     if (!videoId.isNullOrBlank()) 3_500L else 4_500L
                 }
                 val losslessBudgetMs = (losslessTimeoutMs - (SystemClock.elapsedRealtime() - forkStart)).coerceAtLeast(0L)
+                // Unbounded skips the deadline entirely rather than passing
+                // Long.MAX_VALUE to withTimeoutOrNull, whose deadline
+                // computation would overflow.
                 val losslessStream: ResolvedStream? = if (losslessDeferred.isCompleted) {
+                    runCatching { losslessDeferred.await() }.getOrNull()
+                } else if (losslessBudget == LosslessBudget.Unbounded) {
                     runCatching { losslessDeferred.await() }.getOrNull()
                 } else if (losslessBudgetMs <= 0L) {
                     null
@@ -5573,13 +5830,14 @@ class MusicPlayer @Inject constructor(
         track: PlayableTrack,
         videoId: String?,
         allowLossless: Boolean,
+        losslessBudget: LosslessBudget = LosslessBudget.Interactive,
     ): ResolvedStream {
         runCatching { streamResolutionWakeLock?.acquire(60_000L) }
         try {
             var lastFailure: Throwable? = null
             repeat(2) { attempt ->
                 try {
-                    return resolveTrackAudioStream(track, videoId, allowLossless)
+                    return resolveTrackAudioStream(track, videoId, allowLossless, losslessBudget = losslessBudget)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (error: Throwable) {
@@ -5641,10 +5899,15 @@ class MusicPlayer @Inject constructor(
     }
 
     /**
-     * Best-known duration for the given item: exact ExoPlayer value when
-     * available, otherwise the resolve-time seed, otherwise the previous UI
-     * value. Never returns 0 while a seed exists, so a slow-to-parse stream
-     * can't zero out (and freeze) the progress bar mid-track.
+     * Best-known duration for the item the player currently holds, applied
+     * through [selectDuration] so a previous track's length can never be reused
+     * as this one's denominator or crossfade timer.
+     *
+     * Returns 0 while nothing trustworthy is known, which is the honest answer:
+     * a stream whose container has not parsed yet has no length, and the caller
+     * shows no denominator rather than the outgoing track's. Reuse across
+     * re-reads of the *same* item is still allowed, so a mid-track rebuffer
+     * cannot freeze the progress bar at 0:00.
      */
     private fun effectiveDuration(
         playerDurationMs: Long,
@@ -5661,17 +5924,28 @@ class MusicPlayer @Inject constructor(
             rememberKnownDuration(current?.localConfiguration?.customCacheKey, playerDurationMs)
             rememberKnownDuration(current?.mediaId, playerDurationMs)
             rememberTrackDuration(currentTrack, playerDurationMs)
+            durationOwnerMediaId = current?.mediaId
             return playerDurationMs
         }
-        val seeded = current?.localConfiguration?.customCacheKey?.let(knownDurations::get)
+        // Everything below is keyed to the item in hand, so it is trustworthy
+        // even across a transition. `previousMs` deliberately is not: that is
+        // whatever was published last, which after a track change describes a
+        // different song entirely.
+        val knownForCurrentItem = current?.localConfiguration?.customCacheKey?.let(knownDurations::get)
             ?: current?.mediaId?.let(knownDurations::get)
             ?: findKnownDuration(currentTrack)
             ?: current?.mediaMetadata?.extras?.getLong("durationMs")?.takeIf { it > 0L }
             ?: currentTrack?.durationMs?.takeIf { it > 0L }
             ?: current?.localConfiguration?.customCacheKey?.let(preparedStreams::get)?.durationMs
-            ?: previousMs.takeIf { it > 0L }
-            ?: _state.value.durationMs.takeIf { it > 0L }
-        return seeded ?: 0L
+        return selectDuration(
+            DurationRequest(
+                playerMs = playerDurationMs,
+                knownForCurrentItemMs = knownForCurrentItem?.coerceAtLeast(0L) ?: 0L,
+                publishedMs = previousMs,
+                publishedBelongsToCurrentItem = current?.mediaId != null &&
+                    durationOwnerMediaId == current.mediaId,
+            ),
+        )
     }
 
     private fun findPreparedStreamFor(
@@ -5983,6 +6257,7 @@ class MusicPlayer @Inject constructor(
             repeatMode = session.repeatMode,
             speed = session.speed,
         )
+        durationOwnerMediaId = restoredQueue[restoredIndex].mediaIdKey()
         pendingRestoredSession = session.copy(
             queue = restoredQueue,
             currentIndex = restoredIndex,
@@ -6080,7 +6355,7 @@ class MusicPlayer @Inject constructor(
         val selectionIsResolving = selectedMediaId != null &&
             resolvingMediaIds[selectedMediaId] == playRequestGeneration.get()
         if ((selectionIsResolving || unavailableSkipJob?.isActive == true) &&
-            (player.currentMediaItemIndex != previous.currentIndex || player.currentMediaItem?.mediaId != selectedMediaId)
+            (player.currentMediaItemIndex != previous.currentIndex || !isCurrentMediaMatch(player, previous.current))
         ) return
         val queue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).toPlayableTrack() }
         val current = player.currentMediaItem?.toPlayableTrack()
@@ -6111,7 +6386,7 @@ class MusicPlayer @Inject constructor(
         // TIME_UNSET (buffering / container not parsed yet): that reset froze
         // the bar at 0:00 and disabled seeking until the next event.
         val dur = effectiveDuration(player.duration, player, previous.durationMs)
-        val currentMediaMatch = player.currentMediaItem?.mediaId == previous.current?.mediaIdKey()
+        val currentMediaMatch = isCurrentMediaMatch(player, previous.current)
         val pos = if (!exclusiveUsbOutput.isActive() && player.playbackState != Player.STATE_IDLE && currentMediaMatch) {
             settleSeekPosition(player.currentPosition.coerceAtLeast(0L)).let { raw ->
                 if (previous.positionMs == 0L && player.playbackState == Player.STATE_BUFFERING && raw > 1_500L) 0L else raw
@@ -6233,11 +6508,23 @@ class MusicPlayer @Inject constructor(
         const val TAIL_PIN_TIMEOUT_MS = 5_000L
         /** Debounce so STATE_ENDED + ticker watchdog can't churn generations. */
         const val AUTO_ADVANCE_DEBOUNCE_MS = 3_000L
-        /** Arm the crossfade standby early so the next track can buffer
-         *  before the fade window. Without this the handoff requires READY
-         *  on the exact tick it enters the window and slow resolves always
-         *  miss it. */
+        /** Buffered lead kept for the crossfade standby: the next track is
+         *  resolved and prepared this far ahead of the fade window, so the
+         *  hand-off only ever has to wait for STATE_READY. */
         const val CROSSFADE_ARM_LEAD_MS = 10_000L
+        /** Extra headroom on top of [CROSSFADE_ARM_LEAD_MS] for re-requesting a
+         *  next-track stream whose signed URL is dead or inside the expiry
+         *  margin. Provider modules / addons mint short-TTL FLAC URLs, so a
+         *  resolve started at track start reads expired by the time the window
+         *  opens; re-requesting at the window edge left no time to prepare and
+         *  turned every such fade into a hard cut. */
+        const val CROSSFADE_PREP_REFRESH_LEAD_MS = 30_000L
+        /** Rate limit for the per-tick crossfade decision log. */
+        const val CROSSFADE_LOG_THROTTLE_MS = 5_000L
+        /** Minimum gap between next-track resolve kicks for the same item. */
+        const val CROSSFADE_RESOLVE_RETRY_MS = 8_000L
+        /** Poll cadence used while the downloader yields to an armed standby. */
+        const val CURRENT_TRACK_CACHE_STANDBY_YIELD_MS = 500L
         /** UI-playing but ExoPlayer frozen (pos + buffer) this long means a
          *  silent window, not slow loading — legit rebuffers advance the
          *  buffer and reset the clock. Well above normal hitches, far below
