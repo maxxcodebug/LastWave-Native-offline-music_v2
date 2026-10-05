@@ -448,7 +448,6 @@ class SettingsViewModel @Inject constructor(
     fun setPreferLosslessStreaming(enabled: Boolean) = launchSettingsAction("update streaming preference") { settingsPreferences.setPreferLosslessStreaming(enabled) }
     fun setLosslessQuality(quality: Int) = launchSettingsAction("update streaming quality") { settingsPreferences.setLosslessQuality(quality) }
     fun setDownloadQuality(quality: Int) = launchSettingsAction("update download quality") { settingsPreferences.setDownloadQuality(quality) }
-    fun setDolbyAtmosEnabled(enabled: Boolean) = launchSettingsAction("update Dolby Atmos preference") { settingsPreferences.setDolbyAtmosEnabled(enabled) }
     fun setStudioMasterClarity(enabled: Boolean) {
         // Apply immediately; DataStore persists the same state for future engine instances.
         launchSettingsAction("update Studio Master Clarity") {
@@ -458,6 +457,7 @@ class SettingsViewModel @Inject constructor(
                 // Enabling DSP clarity disables Bit-Perfect mode
                 settingsPreferences.setBitPerfectEnabled(false)
                 applyNativeAudio { it.setBitPerfect(false) }
+                com.lastwave.app.playback.usb.UsbExclusivePrefs.setEnabled(context, false)
             }
         }
     }
@@ -672,11 +672,11 @@ class SettingsViewModel @Inject constructor(
     fun handleCsvPicked(uri: android.net.Uri) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                // Extract filename
-                val cursor = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-                val displayName = cursor?.use {
-                    if (it.moveToFirst()) it.getString(0) else null
-                } ?: "Imported Playlist"
+                val displayName = runCatching {
+                    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                        if (it.moveToFirst()) it.getString(0) else null
+                    }
+                }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Playlist.csv"
 
                 val fileType = displayName.substringAfterLast('.', "File").uppercase()
                 _uiState.update { it.copy(toastMessage = "Matching and importing $fileType songs...") }

@@ -42,7 +42,6 @@ class UacFeatureVolume(
             featureUnitId = id
             channels = verifiedChannels
             available = true
-            writeMute(featureUnitId, false) // Ensure DAC hardware is unmuted on attach
             Log.i(
                 TAG,
                 "Feature Unit volume verified id=0x${id.toString(16)} " +
@@ -55,12 +54,6 @@ class UacFeatureVolume(
         return false
     }
 
-    /** Explicitly unmutes the hardware DAC via SET_CUR on the Feature Unit Mute control. */
-    fun unmute(): Boolean {
-        if (!available || featureUnitId == 0) return false
-        return writeMute(featureUnitId, false)
-    }
-
     fun setNormalized(volume: Float): Boolean {
         if (!available || featureUnitId == 0) return false
         val clamped = volume.coerceIn(0f, 1f)
@@ -69,7 +62,7 @@ class UacFeatureVolume(
         for (channel in channels) {
             if (writeVolume(featureUnitId, channel, coded)) ok = true
         }
-        writeMute(featureUnitId, clamped < 0.0001f)
+        writeMute(featureUnitId, clamped <= 0f)
         if (ok && clamped in 0.001f..0.85f && coded < -512) {
             val checkChannel = channels.first()
             val readback = readVolume(featureUnitId, checkChannel)
@@ -243,8 +236,7 @@ class UacFeatureVolume(
         val data = byteArrayOf(if (mute) 1 else 0)
         val wIndex = (unitId shl 8) or controlInterfaceId
         var ok = false
-        val targetChannels = if (0 !in channels) intArrayOf(0) + channels else channels
-        for (channel in targetChannels) {
+        for (channel in channels) {
             val wValue = MUTE_WVALUE or (channel and 0xFF)
             val ret = connection.controlTransfer(
                 0x21,

@@ -803,9 +803,9 @@ fun SettingsScreen(
 
                     val isIgnored = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
                     val totalAudioRows = if (misc.crossfadeEnabled) {
-                        if (isIgnored) 7 else 8
-                    } else {
                         if (isIgnored) 6 else 7
+                    } else {
+                        if (isIgnored) 5 else 6
                     }
                     SettingsGroup(rowCount = totalAudioRows) { index, position ->
                         when (index) {
@@ -830,21 +830,6 @@ fun SettingsScreen(
                                 isHighlighted = (highlightedSettingId == "audio.download_quality"),
                             )
                             2 -> SettingsToggleCard(
-                                icon = Icons.Filled.GraphicEq,
-                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
-                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
-                                title = "Dolby Atmos / Spatial Audio",
-                                subtitle = if (misc.dolbyAtmosEnabled) {
-                                    "Direct multi-channel spatial audio"
-                                } else {
-                                    "Off \u2022 Streams standard stereo lossless audio"
-                                },
-                                checked = misc.dolbyAtmosEnabled,
-                                onCheckedChange = viewModel::setDolbyAtmosEnabled,
-                                position = position,
-                                isHighlighted = (highlightedSettingId == "audio.dolby_atmos"),
-                            )
-                            3 -> SettingsToggleCard(
                                 icon = Icons.Filled.Tune,
                                 iconContainer = MaterialTheme.colorScheme.primaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -859,7 +844,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.bit_perfect"),
                             )
-                            4 -> SettingsToggleCard(
+                            3 -> SettingsToggleCard(
                                 icon = Icons.Filled.GraphicEq,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -876,7 +861,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.crossfade"),
                             )
-                            5 -> if (misc.crossfadeEnabled) {
+                            4 -> if (misc.crossfadeEnabled) {
                                 CrossfadeDurationRow(
                                     seconds = misc.crossfadeSeconds,
                                     onSecondsChange = viewModel::setCrossfadeSeconds,
@@ -900,7 +885,7 @@ fun SettingsScreen(
                                     isHighlighted = (highlightedSettingId == "audio.download_lyrics"),
                                 )
                             }
-                            6 -> if (misc.crossfadeEnabled) {
+                            5 -> if (misc.crossfadeEnabled) {
                                 SettingsToggleCard(
                                     icon = Icons.Filled.Lyrics,
                                     iconContainer = MaterialTheme.colorScheme.secondaryContainer,
@@ -928,7 +913,7 @@ fun SettingsScreen(
                                     isHighlighted = (highlightedSettingId == "audio.battery_optimization"),
                                 )
                             }
-                            7 -> if (!isIgnored) {
+                            6 -> if (!isIgnored) {
                                 SettingsActionCard(
                                     icon = Icons.Filled.Bolt,
                                     iconContainer = MaterialTheme.colorScheme.errorContainer,
@@ -954,7 +939,7 @@ fun SettingsScreen(
                         LoudnessMode.ALBUM -> "Album \u2022 Keep intentional album dynamics"
                         else -> "Off \u2022 Play tagged tracks at original level"
                     }
-                    SettingsGroup(rowCount = 6) { index, position ->
+                    SettingsGroup(rowCount = 7) { index, position ->
                         when (index) {
                             0 -> SettingsToggleCard(
                                 icon = Icons.Filled.Usb,
@@ -1000,6 +985,21 @@ fun SettingsScreen(
                                 isHighlighted = (highlightedSettingId == "audio.equalizer"),
                             )
                             3 -> SettingsToggleCard(
+                                icon = Icons.Filled.VolumeUp,
+                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                title = "System Audio Effects",
+                                subtitle = if (misc.systemEffectsMode) {
+                                    "External effects active • in-app EQ bypassed"
+                                } else {
+                                    "Let Dolby / equalizer apps process playback"
+                                },
+                                checked = misc.systemEffectsMode,
+                                onCheckedChange = viewModel::setSystemEffectsMode,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.system_audio_effects"),
+                            )
+                            4 -> SettingsToggleCard(
                                 icon = Icons.Filled.Waves,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1014,7 +1014,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.studio_clarity"),
                             )
-                            4 -> SettingsActionCard(
+                            5 -> SettingsActionCard(
                                 icon = Icons.Filled.Tune,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -1024,7 +1024,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.clarity_preset"),
                             )
-                            5 -> SettingsToggleCard(
+                            6 -> SettingsToggleCard(
                                 icon = Icons.Filled.GraphicEq,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1167,7 +1167,7 @@ fun SettingsScreen(
                         item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_experimental))
-                    SettingsGroup(rowCount = 7) { index, position ->
+                    SettingsGroup(rowCount = 6) { index, position ->
                         when (index) {
                             0 -> SettingsActionCard(
                                 icon = Icons.Filled.Lyrics,
@@ -1253,21 +1253,6 @@ fun SettingsScreen(
                                 onClick = { showLyricsSizeDialog = true },
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.lyrics_size"),
-                            )
-                            6 -> SettingsToggleCard(
-                                icon = Icons.Filled.VolumeUp,
-                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
-                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
-                                title = "System Audio Effects",
-                                subtitle = if (misc.systemEffectsMode) {
-                                    "External effects active • in-app EQ bypassed"
-                                } else {
-                                    "Let Dolby / equalizer apps process playback"
-                                },
-                                checked = misc.systemEffectsMode,
-                                onCheckedChange = viewModel::setSystemEffectsMode,
-                                position = position,
-                                isHighlighted = (highlightedSettingId == "appearance.system_audio_effects"),
                             )
                         }
                     }
@@ -2195,7 +2180,7 @@ fun SettingsScreen(
                 }
 
                 Text(
-                    "Lossless streams provide bit-exact studio quality (FLAC/MP3). If your chosen quality is unavailable, LastWave automatically streams the higher quality tier above it (or falls back to YouTube Music if unavailable in lossless).",
+                    "YouTube Music plays strictly as-is (never upgrades). Dolby Atmos plays only when selected — otherwise it never plays. Atmos falls back to Hi-Res → CD → 320 kbps → YouTube. Hi-Res steps down to lower lossless tiers, then YouTube last.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -2346,7 +2331,7 @@ fun SettingsScreen(
                 }
 
                 Text(
-                    "Lossless downloads provide bit-exact studio quality (FLAC/MP3). If your chosen quality is unavailable, LastWave automatically downloads the higher quality tier above it (or falls back to YouTube Music if unavailable in lossless).",
+                    "YouTube Music downloads strictly as-is (never upgrades). Dolby Atmos downloads only when selected — otherwise it never downloads. Atmos falls back to Hi-Res → CD → 320 kbps → YouTube. Hi-Res steps down to lower tiers, then YouTube last.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -2460,11 +2445,11 @@ fun SettingsScreen(
 }
 
 private fun appVersionName(context: android.content.Context): String = try {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.2"
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.2.3"
 } catch (error: Exception) {
-    "4.2.2"
+    "4.2.3"
 } catch (error: LinkageError) {
-    "4.2.2"
+    "4.2.3"
 }
 
 /** Small tap-scale used across the row-style cards on this screen for a

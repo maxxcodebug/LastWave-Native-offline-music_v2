@@ -1,10 +1,11 @@
 package com.lastwave.app.ui.player
 
-import android.os.SystemClock
 import kotlinx.coroutines.delay
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -15,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.FormatSize
 import kotlin.math.roundToInt
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
@@ -33,6 +36,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -57,20 +63,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.material3.Slider
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.text.TextLayoutResult
 import com.lastwave.app.ui.theme.LocalLiquidGlass
 import com.lastwave.app.ui.theme.LiquidGlassPreset
 import com.lastwave.app.ui.theme.LiquidGlassSurface
@@ -78,11 +89,14 @@ import com.lastwave.app.ui.theme.liquidGlassChrome
 import com.lastwave.app.ui.theme.liquidGlassContainerColor
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
@@ -99,16 +113,7 @@ import com.lastwave.app.playback.MusicPlayerState
 import com.lastwave.app.playback.PlaybackProgressState
 import com.lastwave.app.ui.common.ExpressiveInlineLoadingIndicator
 import com.lastwave.app.ui.common.ExpressiveMotion
-import com.mocharealm.accompanist.lyrics.core.model.Artist
-import com.mocharealm.accompanist.lyrics.core.model.ISyncedLine
-import com.mocharealm.accompanist.lyrics.core.model.SyncedLyrics
-import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeAlignment
-import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeLine
-import com.mocharealm.accompanist.lyrics.core.model.karaoke.KaraokeSyllable
-import com.mocharealm.accompanist.lyrics.core.model.synced.SyncedLine
-import com.mocharealm.accompanist.lyrics.ui.composable.lyrics.KaraokeLyricsView
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.isActive
 
 @Composable
 fun ModernLyricsPanel(
@@ -131,45 +136,14 @@ fun ModernLyricsPanel(
     secondaryColor: Color = MaterialTheme.colorScheme.secondary,
     tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
 ) {
-    val track = state.current ?: return
+    state.current ?: return
 
-    val progress by (progressState ?: player.progressState).collectAsStateWithLifecycle(
-        initialValue = PlaybackProgressState(positionMs = state.positionMs, durationMs = state.durationMs),
-    )
+    // High-frequency progress is collected ONLY in the leaf hosts below
+    // (lyrics list + controls). Collecting it here would recompose the whole
+    // panel incl. AnimatedContent + badge ~16x/sec. Other players isolate it.
+    val progressFlow = progressState ?: player.progressState
+    val progressInitial = PlaybackProgressState(positionMs = state.positionMs, durationMs = state.durationMs)
 
-    // High-precision hardware-synced position clock for 60/120/144fps+ bit-perfect vocal sync
-    var anchorProgressMs by remember(track) { mutableLongStateOf(progress.positionMs) }
-    var anchorNanos by remember(track) { mutableLongStateOf(System.nanoTime()) }
-    var smoothedPositionMs by remember(track) { mutableLongStateOf(progress.positionMs) }
-
-    LaunchedEffect(progress.positionMs, state.isPlaying, track) {
-        val nowNanos = System.nanoTime()
-        val elapsedMs = if (state.isPlaying) (nowNanos - anchorNanos) / 1_000_000L else 0L
-        val estimatedMs = anchorProgressMs + elapsedMs
-        val drift = progress.positionMs - estimatedMs
-
-        if (!state.isPlaying || kotlin.math.abs(drift) > 500L) {
-            // Hard seek, pause, or big drift: snap anchor immediately
-            anchorProgressMs = progress.positionMs
-            anchorNanos = nowNanos
-            smoothedPositionMs = progress.positionMs
-        } else {
-            // Micro-drift: gently steer anchor without any sudden jumping or stutter
-            anchorProgressMs += (drift * 0.25f).toLong()
-            anchorNanos = nowNanos
-        }
-    }
-
-    LaunchedEffect(state.isPlaying, track) {
-        if (!state.isPlaying) return@LaunchedEffect
-        while (isActive) {
-            withFrameNanos { nowNanos ->
-                val elapsedMs = (nowNanos - anchorNanos) / 1_000_000L
-                val dur = progress.durationMs.takeIf { it > 0 } ?: state.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
-                smoothedPositionMs = (anchorProgressMs + elapsedMs).coerceIn(0L, dur)
-            }
-        }
-    }
 
     Column(modifier = modifier.fillMaxSize()) {
         AnimatedContent(
@@ -223,11 +197,10 @@ fun ModernLyricsPanel(
                             onRetry = onRetry,
                         )
                     } else if (targetState.isSynced && targetState.lines.isNotEmpty()) {
-                        // Line-sync rows (no syllables) use the compact tier
-                        // below; overlong word-sync rows are pre-split to the
-                        // measured width so the large type never overflows
-                        // off-screen. The list sits a little lower so the
-                        // first line clears the header.
+                        // Reference parity: one provider timestamp stays one
+                        // drawn row — long rows wrap visually via Text
+                        // soft-wrap on their own timestamp, never sliced
+                        // into fabricated timed chunks.
                         val isWordSynced = targetState.isWordSynced ||
                             remember(targetState.lines) { targetState.lines.any { it.hasSyllables } }
                         val isOverallRtl = remember(targetState.lines) {
@@ -237,17 +210,12 @@ fun ModernLyricsPanel(
                         }
                         // Apple Music word-sync rows run full-sentence wide, so
                         // they keep a compact size while other providers use
-                        // the standard tier. Sizes are deliberately moderate:
-                        // oversized type was the gap driver (fewer words fit,
-                        // the splitter chopped rows, multiplied spacing).
-                        // The wrap budget below is measured in these same
-                        // styles so rows still clear the edges.
+                        // the standard tier. Sizes stay moderate so wrapped
+                        // rows clear the edges at the focus zoom.
                         val isAppleMusic = remember(targetState.source) {
                             targetState.source?.contains("Apple Music", ignoreCase = true) == true
                         }
-                        // Shared style instances: the splitter below measures
-                        // with exactly this style, so its fit verdict matches
-                        // what the canvas will draw.
+                        // Shared style instances drawn by every row below.
                         val currentTextStyle = LocalTextStyle.current
                         val karaokeNormalStyle = remember(currentTextStyle, isAppleMusic, isWordSynced, lyricsFontScale) {
                             currentTextStyle.copy(
@@ -300,14 +268,14 @@ fun ModernLyricsPanel(
                                         )
                                     }
                                 }
-                                KaraokeLineWrapScope(
+                                SyncedLyricsProgressHost(
                                     lines = targetState.lines,
                                     isOverallRtl = isOverallRtl,
-                                    trackTitle = track.title,
-                                    trackArtist = track.artist,
                                     normalStyle = karaokeNormalStyle,
                                     accompanimentStyle = karaokeAccompanimentStyle,
-                                    currentPosition = { (smoothedPositionMs + lyricsOffsetMs).toInt() },
+                                    progressFlow = progressFlow,
+                                    progressInitial = progressInitial,
+                                    state = state,
                                     player = player,
                                     lyricsOffsetMs = lyricsOffsetMs,
                                     modifier = Modifier
@@ -336,10 +304,10 @@ fun ModernLyricsPanel(
             }
         }
 
-        ModernLyricsControls(
+        ModernLyricsControlsHost(
             state = state,
-            currentPositionMs = progress.positionMs,
-            totalDurationMs = if (progress.durationMs > 0) progress.durationMs else state.durationMs,
+            progressFlow = progressFlow,
+            progressInitial = progressInitial,
             player = player,
             wavySeekbarEnabled = wavySeekbarEnabled,
             onToggleFullscreen = onToggleFullscreen,
@@ -360,211 +328,278 @@ fun ModernLyricsPanel(
 }
 
 /**
- * Horizontal chrome around karaoke glyphs, both sides combined: 12dp view
- * padding (Modifier.padding on the list below) + 16dp line padding inside
- * each karaoke row. Measured, not guessed: the old 128dp estimate plus a
- * 0.80 panic factor shrank the budget to ~185dp on a 360dp phone, chopping
- * nearly every line into 2-word rows.
- */
-private val KaraokeHorizontalChrome = 56.dp
-
-/**
- * Measures lines against the settled list width and pre-splits only
- * genuinely overlong ones into balanced sub-lines ([splitKaraokeToFit] for
- * word-sync rows, [splitLineSyncToFit] for line-sync rows) before the
- * karaoke canvas ever measures them. The budget keeps a small 0.95 reserve
- * for the canvas's focused-line emphasis (~1.1x zoom on the active row);
- * normal lines pass through untouched with their authored timing, so focus
- * and auto-scroll follow lyric lines instead of fabricated chunks.
+ * Reference lyrics sync list (Metrolist/SimpMusic parity, no gradle canvas).
+ *
+ * Sync contract, identical for word-by-word and line-by-line rows:
+ * - One provider timestamp = one drawn row. Rows are never merged, split,
+ *   or re-timed here; [LyricLine.timeMs] is the single source of truth.
+ * - The active row is the last row with `timeMs <= effectivePosition`
+ *   (binary search, same as the classic view and the reference clients'
+ *   `findCurrentLineIndex`). A row's end is implied by the next row's start,
+ *   never stored, so overlapping focus windows are impossible by
+ *   construction (the old `maxOf(naturalEnd, nextStart)` mapping kept two
+ *   rows lit around every boundary).
+ * - Word fill reads each syllable's own `[timeMs, timeMs + durationMs)`
+ *   window (already de-overlapped upstream by `normalizeLyricTiming`). A
+ *   zero-duration syllable holds until the next syllable starts, matching
+ *   the reference `findActiveLineIndices` end-time fallback.
+ * - Position is the raw playhead plus the manual offset on every tick — no
+ *   time quantization. Reference clients sample per frame (8ms /
+ *   withFrameNanos); the 60ms progress ticker feeding this list is already
+ *   the coarsest step word fills can tolerate (the old 120ms bucketing
+ *   visibly stalled syllables 100-200ms long).
+ * - Long rows wrap visually via [Text] soft-wrap on their own timestamp.
+ *   They are never sliced into fabricated timed chunks: the old
+ *   proportional-width slicing invented timestamps the vocals never sang,
+ *   which is why line-by-line drifted and word-by-word stalled.
  */
 @Composable
-private fun KaraokeLineWrapScope(
+private fun ModernSyncedLyricsList(
     lines: List<LyricLine>,
     isOverallRtl: Boolean,
-    trackTitle: String,
-    trackArtist: String,
     normalStyle: TextStyle,
     accompanimentStyle: TextStyle,
-    currentPosition: () -> Int,
-    player: MusicPlayer,
+    currentPositionMs: () -> Long,
+    isPlaying: Boolean,
+    onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
     lyricsOffsetMs: Long = 0L,
 ) {
-    BoxWithConstraints(modifier) {
-        val density = LocalDensity.current
-        val textMeasurer = rememberTextMeasurer()
-        val wrapBudgetPx = remember(maxWidth, density) {
-            // Tight on purpose: the splitter measures word-by-word while the
-            // canvas draws continuous text (kerning can add a pixel or two),
-            // and the focused line zooms ~1.1x — 0.95 covers both without
-            // chopping lines that fit. Only true overflow splits.
-            with(density) { (maxWidth - KaraokeHorizontalChrome).toPx().coerceAtLeast(0f) } * 0.95f
-        }
-        val displayLines = remember(lines, wrapBudgetPx, normalStyle) {
-            // Word-sync rows split on syllable timing, line-sync rows on
-            // proportional time slices — either way every drawn row fits.
-            val backfilled = backfillLineSyncDurations(lines)
-            backfilled.flatMap { line ->
-                if (!line.hasSyllables) {
-                    line.splitLineSyncToFit(wrapBudgetPx) { text ->
-                        textMeasurer.measure(text, normalStyle).size.width.toFloat()
-                    }
+    val listState = rememberLazyListState()
+    var userScrolledTime by remember { mutableLongStateOf(0L) }
+    val currentPositionMsState by rememberUpdatedState(currentPositionMs)
+
+    val activeIndex by remember(lines) {
+        derivedStateOf { activeLineIndex(lines, currentPositionMsState()) }
+    }
+
+    if (listState.isScrollInProgress) {
+        userScrolledTime = System.currentTimeMillis()
+    }
+
+    LaunchedEffect(activeIndex, isPlaying) {
+        val timeSinceUserScroll = System.currentTimeMillis() - userScrolledTime
+        if (timeSinceUserScroll > 2200L && activeIndex in lines.indices) {
+            runCatching {
+                val layoutInfo = listState.layoutInfo
+                val viewportHeight = layoutInfo.viewportSize.height
+                val targetItem = layoutInfo.visibleItemsInfo.find { it.index == activeIndex }
+                if (targetItem != null && viewportHeight > 0) {
+                    val targetY = viewportHeight / 3
+                    val delta = targetItem.offset - targetY
+                    listState.animateScrollBy(delta.toFloat())
                 } else {
-                    line.splitKaraokeToFit(wrapBudgetPx) { text ->
-                        textMeasurer.measure(text, normalStyle).size.width.toFloat()
-                    }
+                    val targetIndex = (activeIndex - 1).coerceAtLeast(0)
+                    listState.animateScrollToItem(index = targetIndex, scrollOffset = 0)
                 }
             }
         }
-        val syncedLyrics = remember(displayLines, trackTitle, trackArtist, isOverallRtl) {
-            displayLines.toSyncedLyrics(trackTitle, trackArtist, isOverallRtl)
-        }
-        val initialLineIndex = remember(syncedLyrics) {
-            val time = currentPosition()
-            val idx = syncedLyrics.lines.indexOfFirst { time in it.start..it.end }
-            if (idx != -1) idx else syncedLyrics.lines.indexOfFirst { it.start > time }.takeIf { it != -1 } ?: 0
-        }
-        val listState = key(syncedLyrics) {
-            rememberLazyListState(initialFirstVisibleItemIndex = initialLineIndex)
-        }
-        KaraokeLyricsView(
-            listState = listState,
-            lyrics = syncedLyrics,
-            showTranslation = true,
-            showPhonetic = true,
-            currentPosition = currentPosition,
-            onLineClicked = { line ->
-                // Inverse of the highlight shift: tap targets audio time.
-                player.seekTo((line.start - lyricsOffsetMs).coerceAtLeast(0).toLong())
-            },
-            onLinePressed = {},
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 12.dp),
-            offset = 84.dp,
-            normalLineTextStyle = normalStyle,
-            accompanimentLineTextStyle = accompanimentStyle,
-            textColor = Color.White,
-        )
     }
-}
 
-private fun LyricLine.toISyncedLine(isOverallRtl: Boolean = false): ISyncedLine {
-    val lineStart = timeMs.toInt()
-    val lineEnd = if (durationMs > 0) (timeMs + durationMs).toInt()
-    else if (syllables.isNotEmpty()) (syllables.last().timeMs + syllables.last().durationMs).toInt()
-    else lineStart + 4500  // reasonable fallback; backfilled by toSyncedLyrics
-
-    val isLineRtl = isRtl || (isOverallRtl && (text.isBlank() || text == "♪"))
-
-    return if (hasSyllables) {
-        val leadSyllables = syllables.filter { !it.isBackground }
-        if (leadSyllables.isEmpty()) {
-            // Backing-vocal-only row ("(ooh)" ad-libs): a standalone dim
-            // accompaniment row, never a bright lead row. The library
-            // styles top-level accompaniment rows distinctly.
-            val needsSpacing = text.contains(' ') || text.contains('\u00A0')
-            val contents = renderedSyllableContents(syllables, needsSpacing)
-            val bgKaraoke = syllables.mapIndexed { index, syl ->
-                val sStart = syl.timeMs.toInt()
-                val sEnd = ((syl.timeMs + syl.durationMs).toInt()).coerceAtLeast(sStart + 50)
-                KaraokeSyllable(
-                    content = contents.getOrElse(index) { syl.text },
-                    start = sStart,
-                    end = sEnd,
-                )
+    LazyColumn(
+        state = listState,
+        modifier = modifier.clipToBounds(),
+        contentPadding = PaddingValues(top = 40.dp, bottom = 130.dp, start = 16.dp, end = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(26.dp),
+    ) {
+        itemsIndexed(lines, key = { index, line -> "$index:${line.timeMs}" }) { index, line ->
+            val isActive = index == activeIndex
+            val isPast = activeIndex >= 0 && index < activeIndex
+            val distance = kotlin.math.abs(index - activeIndex)
+            val isBgRow = line.syllables.isNotEmpty() && line.syllables.all { it.isBackground }
+            val isLineRtl = remember(line, isOverallRtl) {
+                line.isRtl || (isOverallRtl && (line.text.isBlank() || line.text == "♪"))
             }
-            return KaraokeLine.AccompanimentKaraokeLine(
-                syllables = bgKaraoke,
-                translation = null,
-                alignment = if (isLineRtl) KaraokeAlignment.Start else KaraokeAlignment.End,
-                start = lineStart,
-                end = lineEnd.coerceAtLeast(lineStart + 100),
-                phonetic = null,
+
+            val scaleTarget = if (isActive) 1.06f else if (distance == 1) 0.99f else 0.97f
+            val scale by animateFloatAsState(
+                targetValue = scaleTarget,
+                animationSpec = spring(dampingRatio = 0.74f, stiffness = Spring.StiffnessMediumLow),
+                label = "modernLyricScale_$index",
             )
-        }
-        val bgSyllables = if (leadSyllables.size < syllables.size) syllables.filter { it.isBackground } else emptyList()
-        val needsSpacing = text.contains(' ') || text.contains('\u00A0')
+            val alphaTarget = if (isActive) 1f else if (distance == 1) 0.64f else if (isPast) 0.50f else 0.43f
+            val alpha by animateFloatAsState(
+                targetValue = alphaTarget,
+                animationSpec = tween(160),
+                label = "modernLyricAlpha_$index",
+            )
 
-        // The row's own end caps every syllable: without the cap a generous
-        // provider duration lets one word's fill run into the next word (or
-        // the next row), which reads as the highlight jumping or stalling.
-        val rowEnd = if (durationMs > 0) (timeMs + durationMs).toInt() else Int.MAX_VALUE
-
-        fun List<LyricSyllable>.toKaraokeSyllables(): List<KaraokeSyllable> {
-            // Separator rule lives in renderedSyllableContents (shared with
-            // KaraokeLineSplitter's word grouping) so the wrap points the
-            // splitter breaks at are exactly the points the canvas can wrap.
-            val contents = renderedSyllableContents(this, needsSpacing)
-            return mapIndexed { index, syl ->
-                val sStart = syl.timeMs.toInt()
-                val minDur = if (syl.durationMs > 0) syl.durationMs.toInt() else {
-                    val nextSyl = getOrNull(index + 1)
-                    if (nextSyl != null && nextSyl.timeMs > syl.timeMs) (nextSyl.timeMs - syl.timeMs).toInt()
-                    else 150
+            val lineLayoutDirection = if (isLineRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+            CompositionLocalProvider(LocalLayoutDirection provides lineLayoutDirection) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            this.alpha = alpha * if (isBgRow) (if (isActive) 0.85f else 0.55f) else 1f
+                        }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
+                            onSeek(line.timeMs)
+                        }
+                        .padding(horizontal = 12.dp, vertical = if (isActive) 8.dp else 6.dp),
+                ) {
+                    val fontStyle = if (isBgRow) accompanimentStyle else normalStyle
+                    ModernWordByWordLine(
+                        line = line,
+                        currentPositionMs = currentPositionMs,
+                        isActive = isActive,
+                        activeColor = Color.White,
+                        inactiveColor = Color.White.copy(alpha = 0.55f),
+                        fontStyle = fontStyle,
+                        isRtl = isLineRtl,
+                        modifier = Modifier.padding(start = if (isBgRow) 14.dp else 0.dp),
+                    )
                 }
-                var sEnd = (sStart + minDur).coerceAtLeast(sStart + 50)
-                val nextStart = getOrNull(index + 1)?.timeMs?.toInt()
-                if (nextStart != null && nextStart > sStart && sEnd > nextStart) sEnd = nextStart
-                if (rowEnd > sStart && sEnd > rowEnd) sEnd = rowEnd
-                KaraokeSyllable(
-                    content = contents[index],
-                    start = sStart,
-                    end = sEnd.coerceAtLeast(sStart),
-                )
             }
         }
-
-        val mainSyllables = leadSyllables.toKaraokeSyllables()
-        val effectiveStart = if (mainSyllables.isNotEmpty()) minOf(lineStart, mainSyllables.first().start) else lineStart
-        val effectiveEnd = if (mainSyllables.isNotEmpty()) maxOf(lineEnd, mainSyllables.last().end) else lineEnd
-
-        val accompaniment = if (bgSyllables.isNotEmpty()) {
-            val bgKaraokeSyllables = bgSyllables.toKaraokeSyllables()
-            val bgStart = bgKaraokeSyllables.first().start
-            val bgEnd = bgKaraokeSyllables.last().end.coerceAtLeast(bgStart + 50)
-            listOf(
-                KaraokeLine.AccompanimentKaraokeLine(
-                    syllables = bgKaraokeSyllables,
-                    translation = null,
-                    alignment = if (isLineRtl) KaraokeAlignment.Start else KaraokeAlignment.End,
-                    start = bgStart,
-                    end = bgEnd,
-                    phonetic = null,
-                ),
-            )
-        } else {
-            emptyList()
-        }
-
-        KaraokeLine.MainKaraokeLine(
-            syllables = mainSyllables,
-            translation = null,
-            phonetic = transliteration,
-            alignment = if (isLineRtl) KaraokeAlignment.End else KaraokeAlignment.Start,
-            start = effectiveStart,
-            end = effectiveEnd.coerceAtLeast(effectiveStart + 100),
-            accompanimentLines = accompaniment,
-        )
-    } else {
-        SyncedLine(
-            start = lineStart,
-            end = lineEnd.coerceAtLeast(lineStart + 100),
-            content = text,
-            translation = transliteration,
-        )
     }
 }
 
-private fun List<LyricLine>.toSyncedLyrics(title: String, artist: String, isOverallRtl: Boolean = false): SyncedLyrics {
-    // End times are backfilled first (shared helper, idempotent), so every
-    // row — word-sync or line-sync — maps onto one contiguous clock.
-    val backfilled = backfillLineSyncDurations(this)
-    return SyncedLyrics(
-        lines = backfilled.map { it.toISyncedLine(isOverallRtl) },
-        title = title,
-        artists = listOf(Artist(type = "artist", name = artist)),
-    )
+@Composable
+private fun ModernWordByWordLine(
+    line: LyricLine,
+    currentPositionMs: () -> Long,
+    isActive: Boolean,
+    activeColor: Color,
+    inactiveColor: Color,
+    fontStyle: TextStyle,
+    isRtl: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val lineLayoutDirection = if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+    CompositionLocalProvider(LocalLayoutDirection provides lineLayoutDirection) {
+        if (!line.hasSyllables || !isActive) {
+            Column(
+                modifier = modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.Start,
+            ) {
+                Text(
+                    text = line.text.ifBlank { "♪" },
+                    style = fontStyle,
+                    color = if (isActive) activeColor else inactiveColor,
+                    textAlign = TextAlign.Start,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (!line.transliteration.isNullOrBlank() && isActive) {
+                    Text(
+                        text = line.transliteration,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = 18.sp,
+                            lineHeight = 26.sp,
+                            fontWeight = FontWeight.Medium,
+                            letterSpacing = 0.2.sp,
+                        ),
+                        color = activeColor.copy(alpha = 0.72f),
+                        textAlign = TextAlign.Start,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 3.dp),
+                    )
+                }
+            }
+            return@CompositionLocalProvider
+        }
+
+        val displayTexts = remember(line) { resolveSyllableDisplayTexts(line) }
+        val fullText = remember(line, displayTexts) {
+            line.syllables.indices.joinToString("") { displayTexts.getOrElse(it) { line.syllables[it].text } }
+        }
+        // Char range of each syllable inside [fullText].
+        val charRanges = remember(line, displayTexts) {
+            var offset = 0
+            line.syllables.indices.map { i ->
+                val start = offset
+                offset += displayTexts.getOrElse(i) { line.syllables[i].text }.length
+                start to offset
+            }
+        }
+        var layout by remember(fullText) { mutableStateOf<TextLayoutResult?>(null) }
+
+        Column(
+            modifier = modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.Start,
+        ) {
+            // Karaoke fill: dim base text + bright copy clipped to the sung
+            // extent. Position is read ONLY in the draw phase, so the fill
+            // advances every display frame with zero recomposition/relayout.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = fullText,
+                    style = fontStyle,
+                    color = inactiveColor.copy(alpha = 0.44f),
+                    textAlign = TextAlign.Start,
+                    onTextLayout = { layout = it },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = fullText,
+                    style = fontStyle,
+                    color = activeColor,
+                    textAlign = TextAlign.Start,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .drawWithContent {
+                            val l = layout ?: return@drawWithContent
+                            val textLength = fullText.length
+                            if (textLength == 0) return@drawWithContent
+                            val pos = currentPositionMs()
+                            var fill = 0f
+                            for (i in line.syllables.indices) {
+                                val syl = line.syllables[i]
+                                if (pos < syl.timeMs) break
+                                val (cs, ce) = charRanges[i]
+                                val p = if (syl.durationMs <= 0L) 1f
+                                else ((pos - syl.timeMs).toFloat() / syl.durationMs).coerceIn(0f, 1f)
+                                fill = cs + (ce - cs) * p
+                                if (p < 1f) break
+                            }
+                            if (fill <= 0f) return@drawWithContent
+                            if (fill >= textLength) {
+                                drawContent()
+                                return@drawWithContent
+                            }
+                            val charIdx = fill.toInt().coerceIn(0, textLength - 1)
+                            val frac = fill - charIdx
+                            val lineIdx = l.getLineForOffset(charIdx)
+                            val x0 = l.getHorizontalPosition(charIdx, true)
+                            val x1 = if (charIdx + 1 < textLength && l.getLineForOffset(charIdx + 1) == lineIdx) {
+                                l.getHorizontalPosition(charIdx + 1, true)
+                            } else if (isRtl) l.getLineLeft(lineIdx) else l.getLineRight(lineIdx)
+                            val x = x0 + (x1 - x0) * frac
+                            val top = l.getLineTop(lineIdx)
+                            val bottom = l.getLineBottom(lineIdx)
+                            if (top > 0f) {
+                                clipRect(0f, 0f, size.width, top) { this@drawWithContent.drawContent() }
+                            }
+                            if (isRtl) {
+                                clipRect(x, top, size.width, bottom) { this@drawWithContent.drawContent() }
+                            } else {
+                                clipRect(0f, top, x, bottom) { this@drawWithContent.drawContent() }
+                            }
+                        },
+                )
+            }
+
+            if (!line.transliteration.isNullOrBlank()) {
+                Text(
+                    text = line.transliteration,
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = 0.2.sp,
+                    ),
+                    color = activeColor.copy(alpha = 0.76f),
+                    textAlign = TextAlign.Start,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -666,6 +701,124 @@ private fun ModernEmptyLyricsView(
             }
         }
     }
+}
+
+/**
+ * Leaf host: collects progress ONLY for the lyrics list, so badge +
+ * AnimatedContent above never recompose on ticks. Reference-client parity
+ * (Metrolist/SimpMusic): the raw playhead position drives focus every tick
+ * with no time quantization — word fills step at syllable granularity
+ * (>=50ms), so throttling would visibly stall the karaoke highlight.
+ */
+@Composable
+private fun SyncedLyricsProgressHost(
+    lines: List<com.lastwave.app.data.lyrics.LyricLine>,
+    isOverallRtl: Boolean,
+    normalStyle: TextStyle,
+    accompanimentStyle: TextStyle,
+    progressFlow: StateFlow<PlaybackProgressState>,
+    progressInitial: PlaybackProgressState,
+    state: MusicPlayerState,
+    player: MusicPlayer,
+    lyricsOffsetMs: Long = 0L,
+    modifier: Modifier = Modifier,
+) {
+    val progress by progressFlow.collectAsStateWithLifecycle(initialValue = progressInitial)
+    val latestSampleMs by rememberUpdatedState(progress.positionMs)
+    val offsetState by rememberUpdatedState(lyricsOffsetMs)
+    val framePositionMs = remember { mutableLongStateOf(progress.positionMs) }
+    // Vsync clock (90/120Hz): advances by real frame time and is steered
+    // toward the ExoPlayer playhead (sampled every ~60ms). Never runs
+    // backwards on normal drift; snaps instantly on seeks/track changes.
+    LaunchedEffect(state.isPlaying) {
+        if (!state.isPlaying) {
+            snapshotFlow { latestSampleMs }.collect { framePositionMs.longValue = it }
+            return@LaunchedEffect
+        }
+        var lastSample = latestSampleMs
+        var sampleFrameNanos = -1L
+        var lastFrameNanos = -1L
+        var display = latestSampleMs.toDouble()
+        while (true) {
+            withFrameNanos { now ->
+                val sample = latestSampleMs
+                if (sample != lastSample || sampleFrameNanos < 0L) {
+                    lastSample = sample
+                    sampleFrameNanos = now
+                }
+                val target = sample + ((now - sampleFrameNanos) / 1_000_000.0).coerceAtMost(250.0)
+                val frameDt = if (lastFrameNanos < 0L) 0.0 else (now - lastFrameNanos) / 1_000_000.0
+                lastFrameNanos = now
+                val predicted = display + frameDt
+                val err = target - predicted
+                display = if (kotlin.math.abs(err) > 300.0) {
+                    target
+                } else {
+                    maxOf(display, predicted + err * 0.2)
+                }
+                framePositionMs.longValue = display.toLong()
+            }
+        }
+    }
+    val currentPosition: () -> Long = remember {
+        { framePositionMs.longValue + offsetState }
+    }
+    ModernSyncedLyricsList(
+        lines = lines,
+        isOverallRtl = isOverallRtl,
+        normalStyle = normalStyle,
+        accompanimentStyle = accompanimentStyle,
+        currentPositionMs = currentPosition,
+        isPlaying = state.isPlaying,
+        onSeek = { lineTimeMs ->
+            // Inverse of the highlight shift: tap targets audio time.
+            player.seekTo((lineTimeMs - lyricsOffsetMs).coerceAtLeast(0L))
+        },
+        lyricsOffsetMs = lyricsOffsetMs,
+        modifier = modifier,
+    )
+}
+
+/**
+ * Leaf host for transport controls: owns the 60ms seekbar clock so the panel
+ * above stays static. No behavior change, strictly fewer recompositions.
+ */
+@Composable
+private fun ModernLyricsControlsHost(
+    state: MusicPlayerState,
+    progressFlow: StateFlow<PlaybackProgressState>,
+    progressInitial: PlaybackProgressState,
+    player: MusicPlayer,
+    wavySeekbarEnabled: Boolean = true,
+    onToggleFullscreen: (() -> Unit)? = null,
+    isFullscreen: Boolean = false,
+    lyricsOffsetMs: Long = 0L,
+    onOpenLyricsOffset: (() -> Unit)? = null,
+    lyricsFontScale: Float = 1f,
+    onLyricsFontScaleChange: (Float) -> Unit = {},
+    primaryColor: Color = MaterialTheme.colorScheme.primary,
+    secondaryColor: Color = MaterialTheme.colorScheme.secondary,
+    tertiaryColor: Color = MaterialTheme.colorScheme.tertiary,
+    modifier: Modifier = Modifier,
+) {
+    val progress by progressFlow.collectAsStateWithLifecycle(initialValue = progressInitial)
+    ModernLyricsControls(
+        state = state,
+        currentPositionMs = progress.positionMs,
+        totalDurationMs = if (progress.durationMs > 0) progress.durationMs else state.durationMs,
+        player = player,
+        wavySeekbarEnabled = wavySeekbarEnabled,
+        onToggleFullscreen = onToggleFullscreen,
+        isFullscreen = isFullscreen,
+        lyricsOffsetMs = lyricsOffsetMs,
+        onOpenLyricsOffset = onOpenLyricsOffset,
+        lyricsFontScale = lyricsFontScale,
+        onLyricsFontScaleChange = onLyricsFontScaleChange,
+        primaryColor = primaryColor,
+        secondaryColor = secondaryColor,
+        tertiaryColor = tertiaryColor,
+        modifier = modifier,
+    )
 }
 
 @Composable
@@ -1000,5 +1153,30 @@ private fun ModernLyricsControls(
                 color = Color.White.copy(alpha = 0.85f),
             )
         }
+    }
+}
+
+/**
+ * Animated pixel scroll for [LazyListState], which only ships instant
+ * [LazyListState.scrollBy] and indexed [LazyListState.animateScrollToItem].
+ * Ease-out-cubic frame loop so the active-line follow stays smooth instead
+ * of jumping. Callers already guard with runCatching. Mirrors the classic
+ * view's helper (same package, file-private there so duplicated here).
+ */
+private suspend fun LazyListState.animateScrollBy(pixels: Float) {
+    if (pixels == 0f) return
+    var consumed = 0f
+    var startNanos = -1L
+    var done = false
+    while (!done) {
+        val target = withFrameNanos { now ->
+            if (startNanos < 0L) startNanos = now
+            val t = ((now - startNanos) / 350_000_000f).coerceIn(0f, 1f)
+            done = t >= 1f
+            val eased = 1f - (1f - t) * (1f - t) * (1f - t)
+            pixels * eased
+        }
+        val delta = target - consumed
+        consumed += delta - scrollBy(delta)
     }
 }

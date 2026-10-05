@@ -129,23 +129,6 @@ object SettingsSearchIndex {
             )
             add(
                 SettingsEntry(
-                    id = "audio.dolby_atmos",
-                    title = "Dolby Atmos / Spatial Audio",
-                    subtitle = "Direct multi-channel spatial audio playback or standard stereo lossless",
-                    keywords = listOf(
-                        "dolby", "atmos", "spatial", "spatial audio", "surround", "3d audio",
-                        "multichannel", "multi-channel", "immersive", "binaural", "headphone"
-                    ),
-                    icon = Icons.Filled.GraphicEq,
-                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
-                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
-                    parentTab = SettingsTab.AUDIO,
-                    section = "Audio & Playback",
-                    type = EntryType.TOGGLE,
-                )
-            )
-            add(
-                SettingsEntry(
                     id = "audio.bit_perfect",
                     title = "Bit-Perfect Mode",
                     subtitle = "Bypass Android mixer & DSP; stream bit-exact audio to USB DAC",
@@ -279,6 +262,23 @@ object SettingsSearchIndex {
                     parentTab = SettingsTab.AUDIO,
                     section = "Output & Loudness",
                     type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "audio.system_audio_effects",
+                    title = "System Audio Effects",
+                    subtitle = "Allow external equalizers (Dolby Atmos, Wavelet) to process playback",
+                    keywords = listOf(
+                        "system audio effects", "wavelet", "dolby system", "external eq", "audio fx",
+                        "dsp apps", "system equalizer", "sound enhancer"
+                    ),
+                    icon = Icons.Filled.VolumeUp,
+                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
+                    parentTab = SettingsTab.AUDIO,
+                    section = "Output & Loudness",
+                    type = EntryType.TOGGLE,
                 )
             )
             add(
@@ -573,23 +573,6 @@ object SettingsSearchIndex {
                     parentTab = SettingsTab.APPEARANCE,
                     section = "Experimental & Features",
                     type = EntryType.ACTION,
-                )
-            )
-            add(
-                SettingsEntry(
-                    id = "appearance.system_audio_effects",
-                    title = "System Audio Effects",
-                    subtitle = "Allow external equalizers (Dolby Atmos, Wavelet) to process playback",
-                    keywords = listOf(
-                        "system audio effects", "wavelet", "dolby system", "external eq", "audio fx",
-                        "dsp apps", "system equalizer", "sound enhancer"
-                    ),
-                    icon = Icons.Filled.VolumeUp,
-                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
-                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
-                    parentTab = SettingsTab.APPEARANCE,
-                    section = "Experimental & Features",
-                    type = EntryType.TOGGLE,
                 )
             )
             add(
