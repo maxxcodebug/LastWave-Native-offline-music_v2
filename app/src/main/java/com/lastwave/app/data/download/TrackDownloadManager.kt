@@ -21,6 +21,7 @@ import com.lastwave.app.data.local.db.DownloadedTrackEntity
 import com.lastwave.app.data.lyrics.LyricsRepository
 import com.lastwave.app.data.lyrics.LyricsResult
 import com.lastwave.app.data.music.InnerTubeMusicApi
+import com.lastwave.app.data.music.TextMatch
 import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.lossless.LosslessAudioStream
 import com.lastwave.app.data.lossless.LosslessMusicApi
@@ -162,9 +163,13 @@ class TrackDownloadManager @Inject constructor(
         // of parallel ranges could OOM the process after a few downloads.
         private const val DOWNLOAD_BUFFER_SIZE = 128 * 1024 // 128 KB
         private const val PARALLEL_YOUTUBE_PARTS = 4
-        // Bulk downloads run strictly one by one sequentially to avoid
-        // stacking sockets, buffers and bitmap decodes.
-        private const val MAX_CONCURRENT_DOWNLOADS = 1
+        // Up to 5 tracks download at once; per-download buffers stay small
+        // (128 KB x 4 ranges) so this remains safe on low-RAM devices.
+        private const val MAX_CONCURRENT_DOWNLOADS = 5
+        /** Reconnectable transfer failures tolerated before the attempt is abandoned. */
+        private const val MAX_TRANSFER_RETRIES = 6
+        /** Bound on each YouTube stream-resolve step so one candidate can't wedge a slot. */
+        private const val YT_STREAM_RESOLVE_TIMEOUT_MS = 20_000L
         private const val MIN_PARALLEL_DOWNLOAD_BYTES = 2L * 1024 * 1024
         private const val MIN_VALID_AUDIO_BYTES = 1_024L
         private const val RECONNECT_POLL_INTERVAL_MS = 500L
@@ -184,12 +189,16 @@ class TrackDownloadManager @Inject constructor(
     // buffers) alive for minutes across successive downloads.
     private val downloadClient = okHttpClient.newBuilder()
         .dispatcher(Dispatcher().apply {
-            maxRequests = 24
-            maxRequestsPerHost = 8
+            // 5 concurrent downloads x 4 ranges, usually on one googlevideo
+            // host: a per-host cap of 8 queued ranges behind each other.
+            maxRequests = 40
+            maxRequestsPerHost = 24
         })
-        .connectionPool(ConnectionPool(10, 5, TimeUnit.MINUTES))
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(2, TimeUnit.MINUTES)
+        .connectionPool(ConnectionPool(20, 5, TimeUnit.MINUTES))
+        .connectTimeout(20, TimeUnit.SECONDS)
+        // A stalled socket is detected in 30s and resumed by the retry loop
+        // instead of hanging the download for 2 minutes per stall.
+        .readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(10, TimeUnit.MINUTES)
         .build()
 
@@ -616,6 +625,14 @@ class TrackDownloadManager @Inject constructor(
                 }
 
                 if (preloadedBestMatch != null) {
+                    val isPlausible = !videoId.isNullOrBlank() ||
+                        TextMatch.isSafeTitleMatch(preloadedBestMatch.title, effTitle, effArtistForLookup)
+                    if (!isPlausible) {
+                        preloadedBestMatch = null
+                    }
+                }
+
+                if (preloadedBestMatch != null) {
                     val cleanMatchArtist = preloadedBestMatch.artist
                         .takeUnless { ArtistHelper.isPlayCountOrStat(it) }
                     if (artistWasStat && cleanMatchArtist != null && cleanMatchArtist.isNotBlank()) {
@@ -832,15 +849,23 @@ class TrackDownloadManager @Inject constructor(
                                     durationMs = (losslessStream.durationSeconds * 1000L).takeIf { it > 0 } ?: 0L
                                 }
                             } else {
+                                val isAtmosStream = losslessStream.formatId == LosslessMusicApi.QUALITY_DOLBY_ATMOS ||
+                                    losslessStream.audioCodecOverride == "DOLBY ATMOS"
                                 resolvedUrl = losslessStream.url
-                                mimeType = losslessStream.mimeType.ifBlank { "audio/flac" }
-                                extension = if (mimeType.contains("mp3")) "mp3" else "flac"
+                                mimeType = losslessStream.mimeType.ifBlank { if (isAtmosStream) "audio/mp4" else "audio/flac" }
+                                extension = when {
+                                    mimeType.contains("mp3", ignoreCase = true) -> "mp3"
+                                    isAtmosStream || mimeType.contains("mp4", ignoreCase = true) || mimeType.contains("m4a", ignoreCase = true) -> "m4a"
+                                    else -> "flac"
+                                }
                                 isLossless = !extension.equals("mp3", ignoreCase = true)
                                 val rateKHz = if (losslessStream.samplingRate > 1000.0) losslessStream.samplingRate / 1000.0 else losslessStream.samplingRate
                                 val depth = losslessStream.bitDepth.takeIf { it > 0 }
-                                formatBadge = if (isLossless) {
-                                    formatDetailedQualityBadge(depth, rateKHz)
-                                } else "MP3"
+                                formatBadge = when {
+                                    isAtmosStream -> "DOLBY ATMOS"
+                                    isLossless -> formatDetailedQualityBadge(depth, rateKHz)
+                                    else -> "MP3"
+                                }
                                 durationMs = (losslessStream.durationSeconds * 1000L).takeIf { it > 0 } ?: 0L
                             }
                         }
@@ -1144,30 +1169,33 @@ class TrackDownloadManager @Inject constructor(
                         // Same path as playback (SimpMusic/Metrolist/ArchiveTune style):
                         // explicit videoId first, then cached/broad search candidates.
                         // Never single-shot strict match — search more, try each.
-                        // Budgeted: downloads run strictly serially, so one
-                        // wedged track must not stall the whole batch queue.
+                        // Budgeted so one wedged track cannot hold a
+                        // download slot and stall the batch queue.
                         val ytFallbackStartMs = android.os.SystemClock.elapsedRealtime()
                         val ytResolveBudgetMs = 60_000L
                         val candidateTracks = linkedMapOf<String, YouTubeMusicTrack>()
+                        val isPlausibleTrack: (YouTubeMusicTrack) -> Boolean = { track ->
+                            track.videoId.isNotBlank() && (track.videoId == videoId || TextMatch.isSafeTitleMatch(track.title, finalTitle, lookupArtist))
+                        }
                         videoId?.takeIf { it.isNotBlank() }?.let { candidateTracks[it] =
                             preloadedBestMatch?.takeIf { match -> match.videoId == it }
                                 ?: YouTubeMusicTrack(videoId = it, title = finalTitle, artist = finalArtist)
                         }
-                        preloadedBestMatch?.videoId?.takeIf { it.isNotBlank() }?.let { id ->
-                            candidateTracks.putIfAbsent(id, preloadedBestMatch!!)
+                        preloadedBestMatch?.takeIf(isPlausibleTrack)?.let { match ->
+                            candidateTracks.putIfAbsent(match.videoId, match)
                         }
                         // Broad search is capped inside (10 merged candidates);
                         // the 60s resolve budget below bounds the slow path.
                         runCatching {
                             innerTube.findDownloadCandidates(finalTitle, lookupArtist)
-                        }.getOrDefault(emptyList()).forEach { track ->
+                        }.getOrDefault(emptyList()).filter(isPlausibleTrack).forEach { track ->
                             candidateTracks.putIfAbsent(track.videoId, track)
                         }
                         // Last resort: legacy single strict match (kept for metadata only).
                         if (candidateTracks.isEmpty()) {
                             runCatching {
                                 innerTube.findBestMatch(finalTitle, lookupArtist, prefetchStreams = false)
-                            }.getOrNull()?.let { track ->
+                            }.getOrNull()?.takeIf(isPlausibleTrack)?.let { track ->
                                 candidateTracks.putIfAbsent(track.videoId, track)
                             }
                         }
@@ -1185,22 +1213,31 @@ class TrackDownloadManager @Inject constructor(
                                 break
                             }
                             // 1. Same waterfall playback uses (cache + multi-client direct URLs).
-                            pickedStream = runCatching {
-                                innerTube.peekCachedStream(candidateId)
-                                    ?: innerTube.resolveAudioStream(candidateId)
-                            }.getOrNull()
-                            if (pickedStream == null) {
-                                lastResolveError = null
-                            }
-                            // 2. NewPipe M4A fallback (download-container preference only).
-                            if (pickedStream == null) {
-                                pickedStream = runCatching {
-                                    innerTube.resolveDownloadStream(candidateId)
-                                }.getOrElse { error ->
-                                    if (error !is CancellationException) lastResolveError = error
-                                    null
+                            val playbackStream = try {
+                                kotlinx.coroutines.withTimeoutOrNull(YT_STREAM_RESOLVE_TIMEOUT_MS) {
+                                    innerTube.peekCachedStream(candidateId)
+                                        ?: innerTube.resolveAudioStream(candidateId)
                                 }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                lastResolveError = error
+                                null
                             }
+                            // 2. Opus preference: if playback picked AAC (or failed),
+                            // ask NewPipe for the WebM/Opus rendition, which is
+                            // remuxed below into a fully tagged .opus file.
+                            val opusStream = playbackStream?.takeIf { it.isOpusStream() } ?: try {
+                                kotlinx.coroutines.withTimeoutOrNull(YT_STREAM_RESOLVE_TIMEOUT_MS) {
+                                    innerTube.resolveDownloadStream(candidateId)
+                                }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                lastResolveError = error
+                                null
+                            }
+                            pickedStream = opusStream?.takeIf { it.isOpusStream() } ?: playbackStream ?: opusStream
                             if (pickedStream != null) {
                                 actualVideoId = candidateId
                                 resolvedYtVideoId = candidateId
@@ -2123,7 +2160,7 @@ class TrackDownloadManager @Inject constructor(
             }
             trimmed.startsWith("<?xml") || trimmed.startsWith("<MPD") -> trimmed
             trimmed.startsWith("http://") || trimmed.startsWith("https://") -> {
-                if (trimmed.contains(".mpd") || trimmed.contains("dash")) {
+                if (trimmed.contains(".mpd", ignoreCase = true) || trimmed.contains("dash", ignoreCase = true)) {
                     val req = Request.Builder().url(trimmed).get().build()
                     downloadClient.newCall(req).execute().use { resp ->
                         if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
@@ -2134,32 +2171,32 @@ class TrackDownloadManager @Inject constructor(
         }
         if (xmlStr.isBlank()) return@runCatching null
 
-        val initMatch = Regex("""initialization="([^"]+)"""").find(xmlStr)
-            ?: Regex("""<Initialization\s+sourceURL="([^"]+)"""").find(xmlStr)
-            ?: Regex("""sourceURL="([^"]+)"""").find(xmlStr)
+        val initMatch = Regex("""initialization=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
+            ?: Regex("""<Initialization\s+[^>]*sourceURL=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
+            ?: Regex("""sourceURL=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
             ?: return@runCatching null
         var initUrl = initMatch.groupValues[1].replace("&amp;", "&")
 
-        val mediaMatch = Regex("""media="([^"]+)"""").find(xmlStr)
-            ?: Regex("""<SegmentTemplate\s+[^>]*media="([^"]+)"""").find(xmlStr)
-            ?: Regex("""<SegmentURL\s+media="([^"]+)"""").find(xmlStr)
+        val mediaMatch = Regex("""media=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
+            ?: Regex("""<SegmentTemplate\s+[^>]*media=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
+            ?: Regex("""<SegmentURL\s+[^>]*media=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
             ?: return@runCatching null
         var mediaTemplate = mediaMatch.groupValues[1].replace("&amp;", "&")
 
-        val baseMatch = Regex("""<BaseURL>([^<]+)</BaseURL>""").find(xmlStr)
+        val baseMatch = Regex("""<BaseURL[^>]*>([^<]+)</BaseURL>""", RegexOption.IGNORE_CASE).find(xmlStr)
         val baseUrlPrefix = baseMatch?.groupValues?.get(1)?.trim()?.replace("&amp;", "&")
             ?: if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
                 trimmed.substringBeforeLast('/') + "/"
             } else null
         if (!baseUrlPrefix.isNullOrBlank()) {
-            if (!initUrl.startsWith("http://") && !initUrl.startsWith("https://")) {
+            if (!initUrl.startsWith("http://", ignoreCase = true) && !initUrl.startsWith("https://", ignoreCase = true)) {
                 initUrl = if (baseUrlPrefix.endsWith("/") || initUrl.startsWith("/")) {
                     "${baseUrlPrefix.trimEnd('/')}/${initUrl.trimStart('/')}"
                 } else {
                     "$baseUrlPrefix$initUrl"
                 }
             }
-            if (!mediaTemplate.startsWith("http://") && !mediaTemplate.startsWith("https://")) {
+            if (!mediaTemplate.startsWith("http://", ignoreCase = true) && !mediaTemplate.startsWith("https://", ignoreCase = true)) {
                 mediaTemplate = if (baseUrlPrefix.endsWith("/") || mediaTemplate.startsWith("/")) {
                     "${baseUrlPrefix.trimEnd('/')}/${mediaTemplate.trimStart('/')}"
                 } else {
@@ -2167,8 +2204,14 @@ class TrackDownloadManager @Inject constructor(
                 }
             }
         }
+        if (!initUrl.startsWith("http://", ignoreCase = true) && !initUrl.startsWith("https://", ignoreCase = true)) {
+            return@runCatching null
+        }
+        if (!mediaTemplate.startsWith("http://", ignoreCase = true) && !mediaTemplate.startsWith("https://", ignoreCase = true)) {
+            return@runCatching null
+        }
 
-        val codec = Regex("""codecs="([^"]+)"""").find(xmlStr)
+        val codec = Regex("""codecs=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
             ?.groupValues
             ?.get(1)
             ?.trim()
@@ -2176,22 +2219,23 @@ class TrackDownloadManager @Inject constructor(
             .orEmpty()
 
         var count = 0
-        val sRegex = Regex("""<S\s+[^>]*>""")
+        val sRegex = Regex("""<S\s+[^>]*>""", RegexOption.IGNORE_CASE)
         for (match in sRegex.findAll(xmlStr)) {
             val sTag = match.value
-            val rMatch = Regex("""r="(\d+)"""").find(sTag)
+            val rMatch = Regex("""r=["']?(\d+)["']?""", RegexOption.IGNORE_CASE).find(sTag)
             val r = rMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
             count += 1 + r
         }
         if (count <= 0) {
-            val durationMatch = Regex("""mediaPresentationDuration="PT(?:(\d+)M)?(?:([\d.]+)S)?""").find(xmlStr)
-            val segDurationMatch = Regex("""<SegmentTemplate[^>]*duration="(\d+)"[^>]*timescale="(\d+)"""").find(xmlStr)
-            if (durationMatch != null && segDurationMatch != null) {
-                val min = durationMatch.groupValues[1].toDoubleOrNull() ?: 0.0
-                val sec = durationMatch.groupValues[2].toDoubleOrNull() ?: 0.0
-                val totalSec = min * 60.0 + sec
-                val segDuration = segDurationMatch.groupValues[1].toDoubleOrNull() ?: 1.0
-                val timescale = segDurationMatch.groupValues[2].toDoubleOrNull() ?: 1.0
+            val durationMatch = Regex("""mediaPresentationDuration=["']PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?["']""", RegexOption.IGNORE_CASE).find(xmlStr)
+            val segTemplateMatch = Regex("""<SegmentTemplate\b[^>]*>""", RegexOption.IGNORE_CASE).find(xmlStr)?.value
+            val segDuration = segTemplateMatch?.let { Regex("""\bduration=["'](\d+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toDoubleOrNull() } ?: 1.0
+            val timescale = segTemplateMatch?.let { Regex("""\btimescale=["'](\d+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)?.toDoubleOrNull() } ?: 1.0
+            if (durationMatch != null) {
+                val hours = durationMatch.groupValues.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+                val min = durationMatch.groupValues.getOrNull(2)?.toDoubleOrNull() ?: 0.0
+                val sec = durationMatch.groupValues.getOrNull(3)?.toDoubleOrNull() ?: 0.0
+                val totalSec = hours * 3600.0 + min * 60.0 + sec
                 val segSec = segDuration / timescale
                 if (segSec > 0) {
                     count = Math.ceil(totalSec / segSec).toInt()
@@ -2199,7 +2243,7 @@ class TrackDownloadManager @Inject constructor(
             }
         }
         if (count <= 0) count = 50
-        val startNumberMatch = Regex("""startNumber="(\d+)"""").find(xmlStr)
+        val startNumberMatch = Regex("""startNumber=["'](\d+)["']""", RegexOption.IGNORE_CASE).find(xmlStr)
         val startNumber = startNumberMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
 
         ParsedDashManifest(
@@ -2342,6 +2386,10 @@ class TrackDownloadManager @Inject constructor(
             } catch (error: IOException) {
                 if (!error.isReconnectableTransferFailure()) throw error
                 failureCount++
+                // Bounded: an endlessly failing URL used to retry forever and
+                // freeze the download (and its slot). Offline periods still
+                // wait inside awaitRetryOpportunity, costing one attempt each.
+                if (failureCount > MAX_TRANSFER_RETRIES) throw error
                 onConnectionStateChanged(true)
                 try {
                     awaitRetryOpportunity(downloadKey, failureCount)
@@ -2451,7 +2499,7 @@ class TrackDownloadManager @Inject constructor(
         return trimmed.startsWith("data:application/dash+xml") ||
             trimmed.startsWith("<?xml") ||
             trimmed.startsWith("<MPD") ||
-            url.contains(".mpd") ||
+            url.contains(".mpd", ignoreCase = true) ||
             mime.contains("dash", ignoreCase = true)
     }
 
@@ -2488,23 +2536,30 @@ class TrackDownloadManager @Inject constructor(
     }.getOrDefault(false)
 
     /**
-     * Mirrors playback's spatial check (`MusicPlayer.isSpatialAudioSupportedOnDevice`
-     * + genuine E-AC-3 JOC decoder requirement): a plain `audio/eac3` decoder
-     * (video-passthrough silicon) cannot render an Atmos music stream.
+     * Mirrors playback's spatial check (`MusicPlayer.isSpatialAudioSupportedOnDevice`):
+     * hardware decoder, bundled FFmpeg decoder, or Android S_V2+ Spatializer.
      */
     private fun isAtmosCapableDevice(): Boolean = runCatching {
-        val jocDecoder = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+        val decoder = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.any { info ->
             !info.isEncoder && info.supportedTypes.any { type ->
-                type.equals("audio/eac3-joc", ignoreCase = true)
+                type.equals("audio/eac3-joc", ignoreCase = true) ||
+                    type.equals("audio/eac3", ignoreCase = true) ||
+                    type.equals("audio/ac3", ignoreCase = true)
             }
         }
-        if (!jocDecoder) return@runCatching false
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S_V2) {
-            val am = context.getSystemService(AudioManager::class.java) ?: return@runCatching true
-            val spatializer = am.spatializer
-            if (spatializer.isAvailable || spatializer.isEnabled) return@runCatching true
+        val ffmpeg = runCatching {
+            androidx.media3.decoder.ffmpeg.FfmpegLibrary.isAvailable() &&
+                androidx.media3.decoder.ffmpeg.FfmpegLibrary.supportsFormat(androidx.media3.common.MimeTypes.AUDIO_E_AC3)
+        }.getOrDefault(false)
+        if (decoder || ffmpeg) return@runCatching true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S_V2) {
+            val am = context.getSystemService(AudioManager::class.java)
+            val spatializer = am?.spatializer
+            if (spatializer != null && (spatializer.isAvailable || spatializer.isEnabled)) {
+                return@runCatching true
+            }
         }
-        jocDecoder
+        false
     }.getOrDefault(false)
 
     private fun updateProgress(progress: DownloadProgress) {
@@ -3353,6 +3408,12 @@ class TrackDownloadManager @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun com.lastwave.app.data.music.YouTubeAudioStream.isOpusStream(): Boolean {
+        val m = mimeType.orEmpty().lowercase()
+        return m.contains("webm") || m.contains("ogg") ||
+            codec.orEmpty().contains("opus", ignoreCase = true)
     }
 
     private fun sanitizeFilename(title: String): String =

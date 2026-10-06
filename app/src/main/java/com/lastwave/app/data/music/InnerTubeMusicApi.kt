@@ -1442,18 +1442,9 @@ class InnerTubeMusicApi @Inject constructor(
     ): List<YouTubeMusicTrack> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
         val config = getWebConfig()
-        suspend fun runSearch(params: String?, forceUsGl: Boolean = false): List<YouTubeMusicTrack> {
-            val (hl, gl) = if (forceUsGl) ("en" to "US") else getEffectiveHlGl()
+        suspend fun runSearch(params: String?): List<YouTubeMusicTrack> {
             val body = buildJsonObject {
-                put("context", buildJsonObject {
-                    put("client", buildJsonObject {
-                        put("clientName", "WEB_REMIX")
-                        put("clientVersion", config.clientVersion)
-                        put("hl", hl)
-                        put("gl", gl)
-                        if (!config.visitorData.isNullOrBlank()) put("visitorData", config.visitorData)
-                    })
-                })
+                put("context", context("WEB_REMIX", config.clientVersion, config.visitorData))
                 put("query", query.trim())
                 if (params != null) put("params", params)
             }
@@ -1467,46 +1458,12 @@ class InnerTubeMusicApi @Inject constructor(
             )
             return parseSongRenderers(root)
         }
-
-        // 1. Try filtered "Songs" search on YouTube Music
-        var results = runCatching { runSearch("EgWKAQIIAWoKEAkQBRAKEAMQBA==") }.getOrDefault(emptyList())
-
-        // 2. Unfiltered search on YouTube Music when filtered came back empty
-        if (results.isEmpty()) {
-            results = runCatching { runSearch(null) }.getOrDefault(emptyList())
-        }
-
-        // 3. Fallback to US region if local region was restricted or failed
-        if (results.isEmpty()) {
-            results = runCatching { runSearch(null, forceUsGl = true) }.getOrDefault(emptyList())
-        }
-
-        // 4. Fallback to standard YouTube API when YouTube Music fails
-        if (results.isEmpty()) {
-            results = runCatching {
-                val body = buildJsonObject {
-                    put("context", buildJsonObject {
-                        put("client", buildJsonObject {
-                            put("clientName", "WEB")
-                            put("clientVersion", "2.20240101.00.00")
-                            put("hl", "en")
-                            put("gl", "US")
-                        })
-                    })
-                    put("query", query.trim())
-                }
-                val root = post(
-                    url = "$YOUTUBE_API/search?key=${config.apiKey}&prettyPrint=false",
-                    body = body,
-                    clientName = "WEB",
-                    clientVersion = "2.20240101.00.00",
-                    userAgent = WEB_USER_AGENT,
-                    origin = YOUTUBE_ORIGIN,
-                    referer = "$YOUTUBE_ORIGIN/",
-                    callTimeoutMs = SEARCH_REQUEST_TIMEOUT_MS,
-                )
-                parseSongRenderers(root)
-            }.getOrDefault(emptyList())
+        val filtered = runCatching { runSearch("EgWKAQIIAWoKEAkQBRAKEAMQBA==") }.getOrDefault(emptyList())
+        // Unfiltered POST only when the filtered search came back empty (rare miss).
+        val results = if (filtered.isEmpty()) {
+            runCatching { runSearch(null) }.getOrDefault(emptyList())
+        } else {
+            filtered
         }
 
         val finalResults = results
@@ -2136,16 +2093,14 @@ class InnerTubeMusicApi @Inject constructor(
         }
     }
 
-    /** Resolves stream specifically optimized for download compatibility (M4A AAC container). */
+    /**
+     * Download-only NewPipe extraction preferring the Opus (WebM) rendition, which
+     * the download pipeline remuxes losslessly into a fully tagged .opus file.
+     * No fallback to [resolveAudioStream]: the download path already tried it.
+     */
     suspend fun resolveDownloadStream(videoId: String): YouTubeAudioStream = withContext(Dispatchers.IO) {
         require(videoId.isNotBlank()) { "Missing YouTube Music video id" }
-        try {
-            streamExtractor.resolveAudioStream(videoId, preferM4a = true)
-        } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            resolveAudioStream(videoId)
-        }
+        streamExtractor.resolveAudioStream(videoId, preferOpus = true)
     }
 
     /**
@@ -2827,21 +2782,14 @@ class InnerTubeMusicApi @Inject constructor(
         }
         val best = validCandidates.asSequence()
             .filter { candidate ->
-                val titleMatch = maxOf(similarity(candidate.title, title), similarity(baseTitle(candidate.title), baseTitle(title))) >= 60
+                val titleMatch = TextMatch.isSafeTitleMatch(candidate.title, title, cleanArtist)
                 val artistMatch = cleanArtist.isBlank() ||
-                    similarity(candidate.artist, cleanArtist) >= 35 ||
+                    similarity(candidate.artist, cleanArtist) >= 30 ||
                     normalize(candidate.artist).contains(normalize(cleanArtist)) ||
                     normalize(candidate.title).contains(normalize(cleanArtist))
                 titleMatch && artistMatch
             }
             .maxByOrNull { candidate -> matchScore(candidate, title, cleanArtist) }
-            ?: validCandidates.filter { candidate ->
-                cleanArtist.isBlank() ||
-                    similarity(candidate.artist, cleanArtist) >= 30 ||
-                    normalize(candidate.artist).contains(normalize(cleanArtist)) ||
-                    normalize(candidate.title).contains(normalize(cleanArtist))
-            }.maxByOrNull { candidate -> matchScore(candidate, title, cleanArtist) }
-            ?: validCandidates.firstOrNull().takeIf { cleanArtist.isBlank() }
             ?: throw IOException("No reliable YouTube Music match found for $title by $artist")
         return best.also {
             if (matchCache.size > MAX_MATCH_CACHE_ENTRIES) matchCache.clear()
@@ -2905,18 +2853,10 @@ class InnerTubeMusicApi @Inject constructor(
         }
         if (merged.isEmpty()) return@withContext emptyList()
         val ranked = merged.values.sortedByDescending { matchScore(it, title, cleanArtist) }
-        // Prefer candidates with at least a plausible title link, but keep
-        // the top fallback so download can try the same best-effort stream
-        // playback would have used instead of hard-failing.
         val plausible = ranked.filter { candidate ->
-            maxOf(
-                similarity(candidate.title, title),
-                similarity(baseTitle(candidate.title), baseTitle(title)),
-            ) >= 45 ||
-                normalize(candidate.title).contains(normalize(title)) ||
-                normalize(title).contains(normalize(candidate.title))
+            TextMatch.isSafeTitleMatch(candidate.title, title, cleanArtist)
         }
-        (plausible.ifEmpty { ranked }).take(limit.coerceIn(1, 10))
+        plausible.take(limit.coerceIn(1, 10))
     }
 
     suspend fun isPlayable(title: String, artist: String): Boolean =

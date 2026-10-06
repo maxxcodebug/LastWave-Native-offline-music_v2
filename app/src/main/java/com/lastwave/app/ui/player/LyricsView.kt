@@ -353,7 +353,8 @@ private fun SyncedLyricsList(
         }
     }
 
-    if (listState.isScrollInProgress) {
+    val isDragged by listState.interactionSource.collectIsDraggedAsState()
+    if (isDragged) {
         userScrolledTime = System.currentTimeMillis()
     }
 
@@ -646,7 +647,7 @@ private fun SyncedLyricsList(
                             if (animationStyle == LyricsAnimation.APPLE_ZOOM) FontWeight.Black else FontWeight.ExtraBold
                         } else FontWeight.SemiBold,
                         letterSpacing = (-0.2).sp,
-                        lineHeight = ((if (isBgRow) 30f else 40f) * lyricsFontScale).sp,
+                        lineHeight = ((if (isBgRow) 32f else 42f) * lyricsFontScale).sp,
                     )
 
                     WordByWordLyricLine(
@@ -1256,6 +1257,10 @@ private suspend fun LazyListState.animateScrollBy(pixels: Float) {
             pixels * eased
         }
         val delta = target - consumed
-        consumed += delta - scrollBy(delta)
+        val scrolled = scrollBy(delta)
+        consumed += scrolled
+        if (scrolled == 0f && delta != 0f) {
+            break
+        }
     }
 }
