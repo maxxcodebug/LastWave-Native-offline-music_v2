@@ -1262,7 +1262,8 @@ fun SettingsScreen(
                         item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_canvas_enabled))
-                    SettingsGroup(rowCount = if (misc.canvasEnabled) 3 else 1) { index, position ->
+                    val canvasRowCount = if (misc.canvasEnabled) 3 else 2
+                    SettingsGroup(rowCount = canvasRowCount) { index, position ->
                         when (index) {
                             0 -> SettingsToggleCard(
                                 icon = Icons.Filled.SmartDisplay,
