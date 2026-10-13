@@ -3,6 +3,7 @@ package com.lastwave.app.data.ytmusic
 import android.util.Log
 import com.lastwave.app.data.generate.distinctSongs
 import com.lastwave.app.data.generate.youtubeVideoIdOrNull
+import com.lastwave.app.data.generate.isLocalFile
 import com.lastwave.app.data.music.InnerTubeMusicApi
 import com.lastwave.app.data.music.YtOwnedPlaylist
 import com.lastwave.app.data.playlist.PlaylistRepository
@@ -136,7 +137,10 @@ class YtMusicSyncManager @Inject constructor(
         try {
             // Liked Songs included: it mirrors as a private "Liked Songs"
             // playlist. Selective-sync users opt in via the sync picker.
-            val allPlaylists = playlistRepository.getAll().filterNot { it.remotePlaylistId != null }
+            // "Local songs" holds files from this device only; never mirrored.
+            val allPlaylists = playlistRepository.getAll()
+                .filterNot { it.remotePlaylistId != null }
+                .filterNot { it.mode == com.lastwave.app.data.playlist.LOCAL_SONGS_MODE }
             val syncedIds = preferences.syncedPlaylistIds.first()
             val playlists = if (syncedIds != null) allPlaylists.filter { it.id in syncedIds } else allPlaylists
 
@@ -233,21 +237,19 @@ class YtMusicSyncManager @Inject constructor(
                     throw e
                 }
             }
-        }
-        var mutatedRemote = false
-        if (remoteId != null && remote == null) {
-            // Check if remote playlist was deleted / unlinked on YouTube
-            val remoteExists = innerTube.fetchPlaylist(remoteId) != null
-            if (!remoteExists) {
-                Log.w(TAG, "Linked remote playlist $remoteId for \"${playlist.title}\" no longer exists on YouTube; recreating mirror")
-                remoteId = null
-                mapping = null
-                allMappings.remove(playlist.id)
-                preferences.setMappings(allMappings)
-            } else {
-                throw IllegalStateException("Could not read linked YouTube Music playlist: $remoteId")
+            if (remoteId != null && remote == null) {
+                // fetchOwnedPlaylist() answers null for "deleted", "private",
+                // AND "network/rate-limit failure" alike — it swallows the
+                // HTTP exception internally. Recreating on that null (the old
+                // fetchPlaylist() double-check returned null on a flaky
+                // connection too) orphaned the user's real remote playlist
+                // and stacked a duplicate mirror, once per flaky pass. An
+                // unreadable remote is not a deleted one: skip this pass and
+                // retry when the read succeeds.
+                throw IllegalStateException("Could not read linked YouTube Music playlist: $remoteId; retrying next pass")
             }
         }
+        var mutatedRemote = false
         if (remoteId == null) {
             remoteId = innerTube.createRemotePlaylist(playlist.title)
                 ?: throw IllegalStateException("Could not create YouTube Music playlist")
@@ -278,6 +280,8 @@ class YtMusicSyncManager @Inject constructor(
             playlist.tracks.map { track ->
                 async {
                     track.youtubeVideoIdOrNull()?.let { return@async it }
+                    // Imported files stay local-only (no fuzzy YouTube match).
+                    if (track.isLocalFile()) return@async null
                     matchLimiter.withPermit {
                         val cacheKey = track.key
                         val negativeUntil = negativeMatchCache[cacheKey] ?: 0L
@@ -295,8 +299,9 @@ class YtMusicSyncManager @Inject constructor(
         }
         val desiredVideoIds = mutableListOf<String>()
         var unmatched = 0
-        for (videoId in resolvedVideoIds) {
-            if (videoId != null) desiredVideoIds += videoId else unmatched++
+        resolvedVideoIds.forEachIndexed { index, videoId ->
+            if (videoId != null) desiredVideoIds += videoId
+            else if (!playlist.tracks[index].isLocalFile()) unmatched++
         }
         // Push guard: only tracks carrying an explicit YouTube identity
         // (watch URL / bare videoId on the track itself) may be uploaded to
@@ -314,6 +319,12 @@ class YtMusicSyncManager @Inject constructor(
             remote
         } ?: innerTube.fetchOwnedPlaylist(remoteId)
         ?: throw IllegalStateException("Could not read complete YouTube Music playlist")
+        if (!currentRemote.complete) {
+            // A truncated remote view (a continuation page failed) makes present
+            // tracks look "removed remotely" and they would be deleted. Abort this
+            // pass and retry next time when a complete read succeeds.
+            throw IllegalStateException("YouTube Music playlist read was incomplete; retrying")
+        }
         val remoteItems = currentRemote.items
         val remoteVideoIds = remoteItems.map { it.videoId }
         val baseline = mapping?.lastSyncedVideoIds.orEmpty().toSet()
@@ -348,6 +359,14 @@ class YtMusicSyncManager @Inject constructor(
             }
         val toAdd = finalVideoIds.filter { it !in remoteSet && it in exactVideoIds }
         unmatched += finalVideoIds.count { it !in remoteSet && it !in exactVideoIds }
+        // Only ids that are (or will be, after this pass) actually on the remote
+        // may enter the baseline. Fuzzy/unpushable ids stay out, otherwise they
+        // are remembered as "synced" while absent from the remote and get read
+        // as remote removals on the next pass — deleting the local original.
+        val recordedBaseline = run {
+            val onRemote = remoteSet + toAdd
+            finalVideoIds.filter { it in onRemote }
+        }
 
         if (toRemove.isNotEmpty()) {
             check(innerTube.removeVideosFromRemotePlaylist(remoteId, toRemove)) {
@@ -384,7 +403,8 @@ class YtMusicSyncManager @Inject constructor(
                 playlist.tracks.forEachIndexed { index, track ->
                     val videoId = resolvedVideoIds[index]
                     if (videoId == null) {
-                        if (track.key !in resolvedKeys) add(track)
+                        // An imported file is never a duplicate of its YouTube copy.
+                        if (track.isLocalFile() || track.key !in resolvedKeys) add(track)
                     } else if (videoId in finalSet && seenVideoIds.add(videoId)) {
                         // The merge resolved this row's id: stamp it so the
                         // persisted copy plays directly instead of searching.
@@ -413,7 +433,7 @@ class YtMusicSyncManager @Inject constructor(
             .copy(
                 remoteTitle = playlist.title,
                 lastSyncAtMillis = now,
-                lastSyncedVideoIds = finalVideoIds,
+                lastSyncedVideoIds = recordedBaseline,
             )
         preferences.setMappings(allMappings)
         return unmatched

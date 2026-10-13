@@ -120,6 +120,7 @@ import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Language
@@ -446,6 +447,9 @@ fun SettingsScreen(
     val ytChannelsLoading by viewModel.ytChannelsLoading.collectAsStateWithLifecycle()
     val eq by viewModel.equalizer.collectAsStateWithLifecycle()
     val usbExclusiveEnabled by viewModel.usbExclusiveEnabled.collectAsStateWithLifecycle()
+    val internalDirectEnabled by viewModel.internalDirectEnabled.collectAsStateWithLifecycle()
+    val forceSoftwareVolume by viewModel.forceSoftwareVolume.collectAsStateWithLifecycle()
+    val internalDirectAvailability by viewModel.internalDirectAvailability.collectAsStateWithLifecycle()
     val loudness by viewModel.loudness.collectAsStateWithLifecycle()
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
     val discordPresenceEnabled by viewModel.discordPresenceEnabled.collectAsStateWithLifecycle()
@@ -939,7 +943,7 @@ fun SettingsScreen(
                         LoudnessMode.ALBUM -> "Album \u2022 Keep intentional album dynamics"
                         else -> "Off \u2022 Play tagged tracks at original level"
                     }
-                    SettingsGroup(rowCount = 7) { index, position ->
+                    SettingsGroup(rowCount = 9) { index, position ->
                         when (index) {
                             0 -> SettingsToggleCard(
                                 icon = Icons.Filled.Usb,
@@ -958,7 +962,49 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.usb_exclusive"),
                             )
-                            1 -> SettingsActionCard(
+                            1 -> {
+                                // Probe what this output accepts only once the row is on screen.
+                                LaunchedEffect(Unit) { viewModel.refreshInternalDirectAvailability() }
+                                SettingsToggleCard(
+                                icon = Icons.Filled.SpeakerPhone,
+                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                title = stringResource(R.string.settings_internal_direct),
+                                subtitle = when {
+                                    !internalDirectEnabled -> stringResource(R.string.settings_internal_direct_off)
+                                    internalDirectAvailability.available ->
+                                        stringResource(R.string.settings_internal_direct_on)
+                                    else -> stringResource(
+                                        R.string.settings_internal_direct_inactive,
+                                        stringResource(com.lastwave.app.playback.internalFailureDetail(internalDirectAvailability.reason)),
+                                    )
+                                },
+                                checked = internalDirectEnabled,
+                                // Greyed out when this output cannot be bypassed, but an
+                                // enabled toggle always stays reachable so it can be turned off.
+                                enabled = internalDirectEnabled || internalDirectAvailability.available ||
+                                    internalDirectAvailability.reason == com.lastwave.app.playback.InternalDirectReason.CHECKING,
+                                onCheckedChange = viewModel::setInternalDirectEnabled,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.internal_direct"),
+                            )
+                            }
+                            2 -> SettingsToggleCard(
+                                icon = Icons.Filled.VolumeUp,
+                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                title = stringResource(R.string.settings_force_sw_volume),
+                                subtitle = if (forceSoftwareVolume) {
+                                    stringResource(R.string.settings_force_sw_volume_on)
+                                } else {
+                                    stringResource(R.string.settings_force_sw_volume_off)
+                                },
+                                checked = forceSoftwareVolume,
+                                onCheckedChange = viewModel::setForceSoftwareVolume,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.force_software_volume"),
+                            )
+                            3 -> SettingsActionCard(
                                 icon = Icons.Filled.VolumeUp,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -968,7 +1014,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.loudness_normalization"),
                             )
-                            2 -> SettingsActionCard(
+                            4 -> SettingsActionCard(
                                 icon = Icons.Filled.GraphicEq,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -984,7 +1030,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.equalizer"),
                             )
-                            3 -> SettingsToggleCard(
+                            5 -> SettingsToggleCard(
                                 icon = Icons.Filled.VolumeUp,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -999,7 +1045,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.system_audio_effects"),
                             )
-                            4 -> SettingsToggleCard(
+                            6 -> SettingsToggleCard(
                                 icon = Icons.Filled.Waves,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1014,7 +1060,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.studio_clarity"),
                             )
-                            5 -> SettingsActionCard(
+                            7 -> SettingsActionCard(
                                 icon = Icons.Filled.Tune,
                                 iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -1024,7 +1070,7 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.clarity_preset"),
                             )
-                            6 -> SettingsToggleCard(
+                            8 -> SettingsToggleCard(
                                 icon = Icons.Filled.GraphicEq,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,

@@ -3,6 +3,7 @@
 package com.lastwave.app.ui.player
 
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.BitmapDrawable
@@ -540,6 +541,9 @@ class PlayerViewModel @Inject constructor(
                         forceRefresh = forceRefresh,
                         wordByWord = settingsPreferences.settings.first().wordByWordLyrics,
                         videoId = track.videoId,
+                        localLrcPath = com.lastwave.app.data.generate.LocalAudioFormats
+                            .importedPathOrNull(track.playbackUrl)
+                            ?.let(com.lastwave.app.data.generate.LocalAudioFormats::lrcPathFor),
                         onPartialResult = { partial ->
                             withContext(Dispatchers.Main.immediate) {
                                 coroutineContext.ensureActive()
@@ -686,14 +690,34 @@ class PlayerViewModel @Inject constructor(
 
     fun toggleLiked(track: PlayableTrack) {
         viewModelScope.launch {
-            val loved = likedSongsManager.toggle(track.toGeneratedTrack())
+            // The like write reads Liked Songs, replaces its tracks, then
+            // mirrors to Last.fm — any step can fail while a sync pass holds
+            // the database. An uncaught exception in this launch takes the
+            // process down, so report it like the other playlist mutations.
+            val loved = try {
+                likedSongsManager.toggle(track.toGeneratedTrack())
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                android.util.Log.e("PlayerViewModel", "Like toggle failed", error)
+                _toastMessage.tryEmit("Couldn't update Liked Songs")
+                return@launch
+            }
             mirrorLastFmLove(track, loved)
         }
     }
 
     fun like(track: PlayableTrack) {
         viewModelScope.launch {
-            likedSongsManager.like(track.toGeneratedTrack())
+            try {
+                likedSongsManager.like(track.toGeneratedTrack())
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                android.util.Log.e("PlayerViewModel", "Like failed", error)
+                _toastMessage.tryEmit("Couldn't update Liked Songs")
+                return@launch
+            }
             mirrorLastFmLove(track, loved = true)
         }
     }
@@ -955,7 +979,11 @@ private fun AddToPlaylistDialogHost(
     onFindCachedDuplicates: suspend (Set<Long>) -> Set<Long>,
     onCreate: (String) -> Unit,
 ) {
-    val playlists by viewModel.customPlaylists.collectAsStateWithLifecycle()
+    val allPlaylists by viewModel.customPlaylists.collectAsStateWithLifecycle()
+    // An imported file can't live in a YouTube Music playlist (no videoId).
+    val playlists = remember(allPlaylists, track) {
+        if (track.isImportedLocalFile()) allPlaylists.filterNot { it.remotePlaylistId != null } else allPlaylists
+    }
     AddToPlaylistDialog(
         track = track,
         playlists = playlists,
@@ -1772,7 +1800,13 @@ private fun FullPlayer(
         }
     }
     var canvasAspect by remember(activeCanvas?.url) { mutableFloatStateOf(0f) }
-    var canvasRendered by remember(activeCanvas?.url) { mutableStateOf(false) }
+    // How much of the hero the canvas currently covers — its own fade-in alpha
+    // times the presentation alpha. The static hero fades out in step with it,
+    // so the cover never shows through the video (its bottom fade, its 320 ms
+    // reveal, the repaint window on a track change) and the two never fight for
+    // the same pixels. A disposed canvas reports 0, so the hero returns the
+    // moment a track without a canvas starts.
+    var canvasCover by remember { mutableFloatStateOf(0f) }
     var lyricsFullscreen by remember(currentTab) { mutableStateOf(false) }
     val view = LocalView.current
     DisposableEffect(view, lyricsFullscreen) {
@@ -1822,9 +1856,11 @@ private fun FullPlayer(
     val context = LocalContext.current
     val artworkViewModel: ArtworkViewModel = hiltViewModel()
     val artworkKey = remember(track.title, track.artist) { ArtworkNormalizer.cacheKey(track.title, track.artist) }
-    val resolvedAmbientUrl by remember(artworkKey) {
+    val onlineAmbientUrl by remember(artworkKey) {
         artworkViewModel.resolved.map { it[artworkKey] }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = artworkViewModel.resolved.value[artworkKey])
+    // Local songs: the cover embedded in the user's file wins over online art.
+    val resolvedAmbientUrl = if (track.artworkUrl?.startsWith("file://") == true) null else onlineAmbientUrl
 
     var ambientPrimary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
     var ambientSecondary by remember(track.videoId, track.artworkUrl, track.title, track.artist) { mutableStateOf<Color?>(null) }
@@ -2050,13 +2086,18 @@ private fun FullPlayer(
                         animationSpec = tween(280, easing = FastOutSlowInEasing),
                         label = "heroAlpha",
                     )
+                    // Static cover first, canvas on top: the hero is the
+                    // placeholder while the video loads, and hands the pixels
+                    // over as the canvas's own alpha climbs to full.
+                    val heroCover =
+                        if (canvasCover >= 0.95f) 0f else (1f - canvasCover).coerceIn(0f, 1f)
                     StaticArtworkHero(
                         name = track.title,
                         artist = track.artist,
                         embeddedUrl = track.artworkUrl,
                         resolvedUrl = resolvedAmbientUrl,
                         bottomFade = 0.42f,
-                        alpha = heroAlpha,
+                        alpha = heroAlpha * heroCover,
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .fillMaxWidth()
@@ -2070,8 +2111,8 @@ private fun FullPlayer(
                             alignPortraitTop = true,
                             bottomFade = 0.38f,
                             presentationAlpha = { heroAlpha },
+                            onCoverChanged = { canvasCover = it },
                             onAspectRatioChanged = { canvasAspect = it },
-                            onRenderedChanged = { canvasRendered = it },
                             pausedForTransition = shownDismissY > 0f || currentTab != FullPlayerTab.NOW_PLAYING,
                             modifier = Modifier
                                 .align(Alignment.TopStart)
@@ -3349,6 +3390,9 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
             iconSize = if (isTranslucent) 19.dp else 20.dp,
             modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp),
         )
+        val modeBitPerfect = stringResource(com.lastwave.app.R.string.badge_mode_bit_perfect)
+        val modeDirect = stringResource(com.lastwave.app.R.string.badge_mode_direct)
+        val modeMixer = stringResource(com.lastwave.app.R.string.badge_mode_mixer)
         val pillLabel = remember(
             state.audioCodec,
             state.bitrateKbps,
@@ -3357,13 +3401,29 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
             state.isLossless,
             signalPath.clockFallbackResampled,
             signalPath.appRateHz,
+            signalPath.bitPerfect,
+            signalPath.internalDirectActive,
+            signalPath.usbExclusiveActive,
+            signalPath.bypassRequested,
+            signalPath.internalSession,
+            modeBitPerfect,
         ) {
             val base = qualityBadgeLabel(state)
-            if (signalPath.clockFallbackResampled && signalPath.appRateHz > 0) {
+            val withRate = if (signalPath.clockFallbackResampled && signalPath.appRateHz > 0) {
                 "$base → ${formatSampleRateKHz(signalPath.appRateHz.toDouble())}k"
             } else {
                 base
             }
+            // Fork: say which path the audio actually takes. "Mixer" only when the
+            // user asked for a bypass that is not happening, so it is never noise.
+            val mode = when {
+                signalPath.bitPerfect -> modeBitPerfect
+                signalPath.internalDirectActive && signalPath.internalSession?.directVerified == false -> "$modeDirect?"
+                signalPath.internalDirectActive -> modeDirect
+                signalPath.bypassRequested && !signalPath.usbExclusiveActive -> modeMixer
+                else -> null
+            }
+            if (mode != null) "$withRate · $mode" else withRate
         }
         val isSpatialPill = remember(state.audioCodec) { isSpatialAudioCodec(state.audioCodec) }
         // Atmos gets its own spatial logo — HQ badge is only for lossless, never for spatial.
@@ -3377,15 +3437,23 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
             state.isLossless -> "Lossless quality"
             else -> "Audio quality"
         }
+        val pillHaptics = LocalHapticFeedback.current
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = liquidGlassContainerColor(qualityButtonBackground),
             contentColor = qualityButtonContent,
             tonalElevation = 0.dp,
             shadowElevation = 0.dp,
-            onClick = { showSignalPath = true },
             modifier = Modifier.weight(1.8f).height(if (isTranslucent) 44.dp else 48.dp)
-                .liquidGlassChrome(RoundedCornerShape(24.dp), LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls),
+                .liquidGlassChrome(RoundedCornerShape(24.dp), LocalLiquidGlass.current, LiquidGlassPreset.PlayerControls)
+                .clip(RoundedCornerShape(24.dp))
+                .combinedClickable(
+                    onClick = { showSignalPath = true },
+                    onLongClick = {
+                        pillHaptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        showSignalPath = true
+                    },
+                ),
         ) {
             Row(
                 Modifier.fillMaxSize().padding(horizontal = 10.dp),
@@ -3423,6 +3491,7 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
                     textAlign = TextAlign.Center,
                     color = when {
                         signalPath.bitPerfect -> Color(0xFFE6C15A)
+                        signalPath.directToHal -> Color(0xFF7FD3C3)
                         signalPath.clockFallbackResampled -> Color(0xFFFFB74D)
                         isTranslucent -> Color.White.copy(alpha = 0.95f)
                         else -> Color.Unspecified
@@ -3458,11 +3527,17 @@ private fun PlayerUtilityControls(state: MusicPlayerState, player: MusicPlayer, 
     }
     if (showSignalPath) {
         val dac = usbDac.dac
+        val internalAvailability by player.internalDirectAvailability.collectAsStateWithLifecycle()
+        LaunchedEffect(Unit) { player.refreshInternalDirectAvailability() }
         SignalPathDialog(
             report = signalPath,
             needsUsbPermission = dac != null && dac.hasUsbPeripheral && !dac.usbPermissionGranted,
             onRequestUsbAccess = player::requestUsbPermission,
             onDismiss = { showSignalPath = false },
+            internalAvailability = internalAvailability,
+            internalEnabled = player.isInternalDirectPrefEnabled,
+            internalUnderruns = if (signalPath.internalDirectActive) player.internalDirectUnderruns() else null,
+            usbDiagnostic = if (dac != null) player::usbDiagnosticReport else null,
         )
     }
 }
@@ -3638,7 +3713,12 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                 val dismissState = androidx.compose.material3.rememberSwipeToDismissBoxState(
                     confirmValueChange = { dismissValue ->
                         if (dismissValue != androidx.compose.material3.SwipeToDismissBoxValue.Settled) {
-                            player.removeQueueItem(index)
+                            // Resolve the index at swipe time by stable key: the
+                            // composition-time `index` can be stale if the queue
+                            // shifted between composition and the gesture, which
+                            // removed the wrong item (audit #12).
+                            val currentIndex = queueKeys.indexOf(stableKey)
+                            if (currentIndex >= 0) player.removeQueueItem(currentIndex)
                             true
                         } else {
                             false
@@ -3867,13 +3947,24 @@ private fun PlayerArtwork(
     transformations: List<coil.transform.Transformation> = emptyList(),
     onAspectRatioChanged: (Float) -> Unit = {},
 ) {
+    // The sleeve cover and its canvas are stacked in the same bounds: the
+    // cover is the placeholder while the video loads, then hands the pixels
+    // over as the canvas's own alpha climbs. Without this the static art
+    // stays at full opacity underneath the video and shows through wherever
+    // the canvas is transparent.
+    var sleeveCover by remember(canvas) { mutableFloatStateOf(0f) }
     Box(modifier.clip(RoundedCornerShape(corner)).background(MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) {
         ArtworkImage(
             name = track.title,
             artist = track.artist,
             embeddedUrl = track.artworkUrl,
             fallbackIcon = Icons.Filled.MusicNote,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    alpha =
+                        if (sleeveCover >= 0.95f) 0f else (1f - sleeveCover).coerceIn(0f, 1f)
+                },
             decodeSizePx = decodeSizePx,
             transformations = transformations,
         )
@@ -3883,6 +3974,7 @@ private fun PlayerArtwork(
                 isPlaying = isPlaying,
                 pausedForTransition = pausedForTransition,
                 onAspectRatioChanged = onAspectRatioChanged,
+                onCoverChanged = { sleeveCover = it },
                 contentMode = CanvasContentMode.CROP,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -3900,5 +3992,12 @@ private fun PlayableTrack.toGeneratedTrack() = com.lastwave.app.data.generate.Ge
     artist = artist,
     artworkUrl = artworkUrl,
     album = album,
-    url = videoId?.let { "https://music.youtube.com/watch?v=$it" }.orEmpty(),
+    // Local songs: an imported file keeps its path so any playlist it
+    // is added to plays the copy on disk instead of a YouTube search.
+    url = com.lastwave.app.data.generate.LocalAudioFormats.importedPathOrNull(playbackUrl)
+        ?: videoId?.let { "https://music.youtube.com/watch?v=$it" }.orEmpty(),
 )
+
+/** True for files copied by the Local songs importer (app-private storage). */
+internal fun PlayableTrack.isImportedLocalFile(): Boolean =
+    com.lastwave.app.data.generate.LocalAudioFormats.importedPathOrNull(playbackUrl) != null
