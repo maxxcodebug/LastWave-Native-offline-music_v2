@@ -82,12 +82,17 @@ class ExclusiveUsbOutput @Inject constructor(
     /** Fork setting: never let the DAC's Feature Unit own the listening level. */
     @Volatile private var forceSoftwareVolume = false
 
+    private val sessionBlockedDevices = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile private var currentDeviceKey: String? = null
+    @Volatile private var sessionSummary: String = ""
+
     private val audioManager: AudioManager? =
         appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val volumePrefs =
         appContext.getSharedPreferences("lastwave_exclusive_usb", Context.MODE_PRIVATE)
 
     init {
+        clearBlockedDevices()
         lastNonMaxListeningGain = volumePrefs.getFloat(KEY_LAST_NON_MAX_GAIN, Float.NaN)
         rememberStreamGain(readStreamMusicGain())
     }
@@ -114,6 +119,7 @@ class ExclusiveUsbOutput @Inject constructor(
             if (!enabled) {
                 teardownLocked(closeDevice = true)
             } else {
+                clearBlockedDevices()
                 ensureVolumeObserverLocked()
                 syncListeningGainLocked()
             }
@@ -163,6 +169,8 @@ class ExclusiveUsbOutput @Inject constructor(
     fun softwareGain(): Float = if (!active || hardwareVolume) 1f else softwareGainValue
 
     fun currentRateHz(): Int = if (active) configuredRateHz else 0
+
+    fun activeWireBits(): Int = if (active) activeWireBits else 0
 
     fun lastHardwareRateHz(): Int = lastHardwareRate
 
@@ -253,6 +261,11 @@ class ExclusiveUsbOutput @Inject constructor(
 
     fun syncListeningGain() {
         val stream = readStreamMusicGain() ?: return
+        // While the attach-time 100% pin is held off with the remembered
+        // level, keep ignoring pinned max readings. The next real sub-max
+        // change (a volume key press) ends the hold and applies normally.
+        if (ignoreStreamMusicMax && stream >= ATTACH_MAX_PIN_GAIN) return
+        if (stream < ATTACH_MAX_PIN_GAIN) ignoreStreamMusicMax = false
         val next = stream
         if (lastAppliedCombined.isFinite() &&
             kotlin.math.abs(next - listeningGain) < 1e-4f
@@ -342,16 +355,21 @@ class ExclusiveUsbOutput @Inject constructor(
             startMediaTimeNeedsInit = false
         }
         recheckClockLocked()
+        val gain = softwareGain()
         val chunk = if (isFloatBuffer) {
             val floats = FloatArray(size / Float.SIZE_BYTES)
             buffer.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(floats)
             buffer.position(buffer.limit())
+            ExclusivePcmGain.apply(floats, gain)
             QueuedPcm(floats, null, 0, size)
         } else {
             val encoding = writeRawEncoding(sourceEncoding)
             if (encoding < 0) return false
             val bytes = ByteArray(size)
             buffer.get(bytes)
+            if (gain < 1f - 1e-6f && gain >= 0f) {
+                scalePcmBytes(bytes, encoding, gain)
+            }
             QueuedPcm(null, bytes, encoding, size)
         }
         synchronized(pcmLock) {
@@ -437,6 +455,10 @@ class ExclusiveUsbOutput @Inject constructor(
             paused = false
             pcmLock.notifyAll()
         }
+        synchronized(lock) {
+            pendingVolume = 1f
+            applyVolumeLocked()
+        }
         startMediaTimeNeedsInit = true
         startMediaTimeUs = 0L
         currentFallbackNegotiated = false
@@ -498,6 +520,7 @@ class ExclusiveUsbOutput @Inject constructor(
             startMediaTimeNeedsInit = true
             mediaTimeBaseFrames = reuse.framesWritten
             ensureVolumeObserverLocked()
+            pendingVolume = 1f
             syncListeningGainLocked()
             return true
         }
@@ -536,7 +559,15 @@ class ExclusiveUsbOutput @Inject constructor(
 
         var (alt, wireBits) = usbAudio.findAltSetting(effectiveBits, effectiveRate)
         var rateSetBefore = usbAudio.setSampleRate(effectiveRate)
-        if (!usbAudio.setAltSetting(alt)) return failLocked("setAltSetting $alt failed")
+        if (!usbAudio.setAltSetting(alt)) {
+            val fallbackAlt = usbAudio.findAltSetting(24, effectiveRate)
+            if (fallbackAlt.first != alt && usbAudio.setAltSetting(fallbackAlt.first)) {
+                alt = fallbackAlt.first
+                wireBits = fallbackAlt.second
+            } else {
+                return failLocked("setAltSetting $alt failed")
+            }
+        }
         var reported = usbAudio.readSampleRate()
         if (!rateSetBefore || (reported > 0 && reported != effectiveRate)) {
             rateSetBefore = usbAudio.setSampleRate(effectiveRate)
@@ -637,6 +668,7 @@ class ExclusiveUsbOutput @Inject constructor(
         active = true
         lastFailureReason = null
         paused = false
+        pendingVolume = 1f
         startMediaTimeNeedsInit = true
         startMediaTimeUs = 0L
         mediaTimeBaseFrames = 0L
@@ -647,19 +679,21 @@ class ExclusiveUsbOutput @Inject constructor(
             clockMatched = rateSetBefore && !autoNegotiatedFallback
         }
         clockRechecked = true
-        val controlId = (0 until usbDevice.interfaceCount)
-            .map { usbDevice.getInterface(it) }
-            .firstOrNull {
-                it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 1
-            }?.id ?: 0
-        val volumeControl = UacFeatureVolume(info.connection, controlId)
-        featureVolume = volumeControl
-        val attached = volumeControl.attach()
-        featureVolumeAttached = attached
-        hardwareVolume = attached && !forceSoftwareVolume
-        if (attached && forceSoftwareVolume) {
-            // Software volume requested: hardware level stays at 0 dB.
-            runCatching { volumeControl.setNormalized(1f) }
+        if (!forceSoftwareVolume) {
+            val controlId = (0 until usbDevice.interfaceCount)
+                .map { usbDevice.getInterface(it) }
+                .firstOrNull {
+                    it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 1
+                }?.id ?: 0
+            val volumeControl = UacFeatureVolume(info.connection, controlId)
+            featureVolume = volumeControl
+            val attached = volumeControl.attach()
+            featureVolumeAttached = attached
+            hardwareVolume = attached
+        } else {
+            featureVolume = null
+            featureVolumeAttached = false
+            hardwareVolume = false
         }
         Log.i(
             TAG,
@@ -686,23 +720,22 @@ class ExclusiveUsbOutput @Inject constructor(
 
     // ── Fork: safety guard + diagnostics ──
 
-    @Volatile private var currentDeviceKey: String? = null
-    @Volatile private var sessionSummary: String = ""
-
     private fun blockReasonFor(vendorId: Int, productId: Int): String? =
-        volumePrefs.getString("$KEY_BLOCK_PREFIX$vendorId:$productId", null)
+        sessionBlockedDevices[vendorId.toString() + ":" + productId]
 
-    /** Forget every DAC the guard disabled (USB Exclusive toggled off then on). */
+    /** Forget every DAC the guard disabled. */
     fun clearBlockedDevices() {
-        val editor = volumePrefs.edit()
-        volumePrefs.all.keys.filter { it.startsWith(KEY_BLOCK_PREFIX) }.forEach { editor.remove(it) }
+        sessionBlockedDevices.clear()
+        val prefs = volumePrefs ?: return
+        val editor = prefs.edit()
+        prefs.all?.keys?.filter { it.startsWith(KEY_BLOCK_PREFIX) }?.forEach { editor.remove(it) }
         editor.apply()
     }
 
     /**
      * The DAC is not consuming the stream at the rate it was configured for
      * and its clock was never confirmed: what it plays is garbage (loud noise
-     * on a UAC1 dongle in the field). Stop now, remember the DAC so the next
+     * on a UAC1 dongle in the field). Stop now, remember the DAC for this session so the next
      * track does not blast it again, and let the sink fall back.
      */
     fun abortUnhealthy(reason: String) {
@@ -711,7 +744,7 @@ class ExclusiveUsbOutput @Inject constructor(
             val key = currentDeviceKey
             Log.w(TAG, "Exclusive USB aborted: $reason (device $key)")
             if (key != null) {
-                runCatching { volumePrefs.edit().putString("$KEY_BLOCK_PREFIX$key", reason).apply() }
+                sessionBlockedDevices[key] = reason
             }
             failLocked("stopped for safety: $reason")
         }
@@ -769,15 +802,24 @@ class ExclusiveUsbOutput @Inject constructor(
     }
 
     private fun rememberStreamGain(gain: Float?) {
-        if (gain != null && gain in 0.01f..0.999f) {
+        if (gain != null && gain in MIN_REMEMBERED_GAIN..ATTACH_MAX_PIN_GAIN) {
             lastNonMaxListeningGain = gain
             runCatching { volumePrefs.edit().putFloat(KEY_LAST_NON_MAX_GAIN, gain).apply() }
         }
     }
 
     private fun listeningGainForDac(): Float {
+        val stream = readStreamMusicGain() ?: return listeningGain
+        attachMaxPinFallbackGain(stream, lastNonMaxListeningGain)?.let { remembered ->
+            ignoreStreamMusicMax = true
+            Log.i(
+                TAG,
+                "STREAM_MUSIC pinned at max on attach; using remembered listening gain $remembered",
+            )
+            return remembered
+        }
         ignoreStreamMusicMax = false
-        return readStreamMusicGain() ?: listeningGain
+        return stream
     }
 
     private fun syncListeningGainLocked() {
@@ -971,5 +1013,82 @@ class ExclusiveUsbOutput @Inject constructor(
             C.ENCODING_PCM_32BIT, RAW_PCM32 -> RAW_PCM32
             else -> -1
         }
+
+        private fun scalePcmBytes(bytes: ByteArray, rawEncoding: Int, gain: Float) {
+            if (gain <= 0f) {
+                bytes.fill(0)
+                return
+            }
+            when (rawEncoding) {
+                RAW_PCM16 -> {
+                    var i = 0
+                    while (i + 1 < bytes.size) {
+                        val sample = ((bytes[i].toInt() and 0xFF) or (bytes[i + 1].toInt() shl 8))
+                            .toShort().toInt()
+                        val scaled = (sample * gain + if (sample >= 0) 0.5f else -0.5f).toInt()
+                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        bytes[i] = (scaled and 0xFF).toByte()
+                        bytes[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+                        i += 2
+                    }
+                }
+                RAW_PCM24 -> {
+                    var i = 0
+                    while (i + 2 < bytes.size) {
+                        val b0 = bytes[i].toInt() and 0xFF
+                        val b1 = bytes[i + 1].toInt() and 0xFF
+                        val b2 = bytes[i + 2].toInt()
+                        var sample = (b2 shl 16) or (b1 shl 8) or b0
+                        if (sample and 0x800000 != 0) sample -= 0x1000000
+                        val scaled = (sample * gain.toDouble() + if (sample >= 0) 0.5 else -0.5).toInt()
+                            .coerceIn(-0x800000, 0x7FFFFF)
+                        bytes[i] = (scaled and 0xFF).toByte()
+                        bytes[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+                        bytes[i + 2] = ((scaled shr 16) and 0xFF).toByte()
+                        i += 3
+                    }
+                }
+                RAW_PCM32 -> {
+                    var i = 0
+                    while (i + 3 < bytes.size) {
+                        val b0 = bytes[i].toInt() and 0xFF
+                        val b1 = bytes[i + 1].toInt() and 0xFF
+                        val b2 = bytes[i + 2].toInt() and 0xFF
+                        val b3 = bytes[i + 3].toInt()
+                        val sample = (b3.toLong() shl 24) or (b2.toLong() shl 16) or (b1.toLong() shl 8) or (b0.toLong() and 0xFF)
+                        val scaled = (sample * gain.toDouble()).toLong()
+                            .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
+                        bytes[i] = (scaled and 0xFF).toByte()
+                        bytes[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+                        bytes[i + 2] = ((scaled shr 16) and 0xFF).toByte()
+                        bytes[i + 3] = ((scaled shr 24) and 0xFF).toByte()
+                        i += 4
+                    }
+                }
+            }
+        }
     }
 }
+
+/**
+ * Gain to use when a raw STREAM_MUSIC read is the attach-time 100% pin.
+ *
+ * Android reports the media volume pinned at max the moment a USB DAC
+ * attaches, while the user's real level is still the last non-max volume-key
+ * press. Applying the pinned reading at full scale is what boosted the
+ * volume to 100 on every remove/re-attach. The remembered level is what the
+ * user hears on their next key press, so it wins while the read is pinned.
+ * Null means the raw reading is trustworthy.
+ */
+internal fun attachMaxPinFallbackGain(streamGain: Float, rememberedGain: Float): Float? {
+    if (streamGain < ATTACH_MAX_PIN_GAIN) return null
+    if (!rememberedGain.isFinite()) return null
+    if (rememberedGain < MIN_REMEMBERED_GAIN || rememberedGain > ATTACH_MAX_PIN_GAIN) return null
+    return rememberedGain
+}
+
+/** Raw readings at/above this are the attach-time pin, not a chosen level. */
+private const val ATTACH_MAX_PIN_GAIN = 0.999f
+
+/** Quietest level remembered as the user's real listening gain. */
+private const val MIN_REMEMBERED_GAIN = 0.01f

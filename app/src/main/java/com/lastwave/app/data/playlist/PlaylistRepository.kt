@@ -7,7 +7,7 @@ import com.lastwave.app.data.local.db.SavedPlaylistEntity
 import com.lastwave.app.data.generate.GeneratedTrack
 import com.lastwave.app.data.generate.isLocalFile
 import com.lastwave.app.data.generate.StoredTrack
-import com.lastwave.app.data.generate.pinnedWithVideoIds
+import com.lastwave.app.data.generate.pinnedWithVideoIdsPreserving
 import com.lastwave.app.data.generate.sameSongAs
 import com.lastwave.app.data.generate.toGenerated
 import com.lastwave.app.data.generate.toStored
@@ -33,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import javax.inject.Inject
 import javax.inject.Singleton
 import java.util.concurrent.atomic.AtomicBoolean
@@ -63,8 +64,21 @@ val SavedPlaylist.isYouTubeOnly: Boolean
 private const val MAX_SAVED_PLAYLISTS = 20
 private const val STARTUP_SYNC_WAIT_MS = 2_000L
 private const val TAG = "PlaylistRepository"
-const val LIKED_SONGS_MODE = "liked"
-const val LIKED_SONGS_TITLE = "Liked Songs"
+    const val LIKED_SONGS_MODE = "liked"
+
+    /**
+     * This app's own liked list.
+     *
+     * Named apart from YouTube Music's "Liked Music" so the two are never confused: they
+     * hold the same songs, and each of them can be switched off on its own.
+     */
+    const val LIKED_SONGS_TITLE = "Liked Songs"
+
+    /** YouTube Music's own liked list. */
+    const val LIKED_YT_SONGS_TITLE = "Liked Yt Song"
+
+    /** What this app's liked list was called before it was renamed. */
+    const val LEGACY_LIKED_SONGS_TITLE = "Liked Local Song"
 /** Built-in playlist holding audio files imported from the device. */
 const val LOCAL_SONGS_MODE = "local"
 const val LOCAL_SONGS_TITLE = "Local songs"
@@ -131,7 +145,7 @@ class PlaylistRepository @Inject constructor(
     }
 
     private suspend fun filterPlayable(tracks: List<GeneratedTrack>): List<GeneratedTrack> =
-        tracks.pinnedWithVideoIds(innerTube)
+        tracks.pinnedWithVideoIdsPreserving(innerTube)
 
     private val videoIdBackfillOnce = AtomicBoolean(false)
 
@@ -140,7 +154,7 @@ class PlaylistRepository @Inject constructor(
 
     /** One-shot per process: pins ids for rows saved before list-time pinning
      *  existed, then persists them so the work never repeats. Fire-and-forget
-     *  on [exportScope]; playback never waits on it. */
+     *  on [exportScope]; playback never waits on it. Strictly preserves all tracks. */
     private fun backfillMissingVideoIdsOnce(loaded: List<SavedPlaylist>) {
         if (loaded.none { playlist ->
             playlist.tracks.any { it.needsVideoIdBackfill() }
@@ -152,10 +166,9 @@ class PlaylistRepository @Inject constructor(
                 for (entity in dao.getAll()) {
                     val domain = runCatching { entity.toDomain() }.getOrNull() ?: continue
                     if (domain.tracks.none { it.needsVideoIdBackfill() }) continue
-                    val pinned = domain.tracks.pinnedWithVideoIds(innerTube)
-                    if (pinned.size == domain.tracks.size &&
-                        pinned.zip(domain.tracks).all { (newTrack, oldTrack) -> newTrack.url == oldTrack.url }
-                    ) continue
+                    val pinned = domain.tracks.pinnedWithVideoIdsPreserving(innerTube)
+                    val hasNewPins = pinned.zip(domain.tracks).any { (newTrack, oldTrack) -> newTrack.url != oldTrack.url }
+                    if (!hasNewPins) continue
                     dao.upsert(entity.copy(tracksJson = json.encodeToString(pinned.map { it.toStored() })))
                     changed = true
                 }
@@ -226,7 +239,9 @@ class PlaylistRepository @Inject constructor(
     }
 
     private fun List<SavedPlaylistEntity>.toDomainSorted(): List<SavedPlaylist> =
-        map { it.toDomain() }
+        mapNotNull { entity ->
+            runCatching { entity.toDomain() }.getOrNull()
+        }
             .sortedByDescending { it.createdAtMillis }
             .also { backfillMissingVideoIdsOnce(it) }
 
@@ -255,11 +270,13 @@ class PlaylistRepository @Inject constructor(
      * Returns the saved playlist, or the pre-existing duplicate if skipped.
      */
     suspend fun save(title: String, subtitle: String, mode: String, tracks: List<GeneratedTrack>, discoverSignature: String? = null): SavedPlaylist = saveMutex.withLock {
-        // A failed read must abort the save. Treating it as "no existing
-        // playlists" skipped the dedupe check and stacked a same-title sibling
-        // every time a read failed.
         val existing = getAll()
-        val playableTracks = if (mode == "custom" && tracks.isEmpty()) emptyList() else filterPlayable(tracks)
+        val rawTracks = if (mode == LIKED_SONGS_MODE) {
+            val seen = mutableListOf<GeneratedTrack>()
+            tracks.forEach { t -> if (seen.none { it.sameSongAs(t) }) seen.add(t) }
+            seen
+        } else tracks
+        val playableTracks = if (mode == "custom" && tracks.isEmpty()) emptyList() else filterPlayable(rawTracks)
         existing.firstOrNull {
             it.mode == mode &&
                 it.title.equals(title, ignoreCase = true) &&
@@ -400,9 +417,23 @@ class PlaylistRepository @Inject constructor(
             val playlist = entity.toDomain()
             if (playlist.mode != "custom" && playlist.mode != LIKED_SONGS_MODE) return@withLock playlist
             if ((playlist.mode == LIKED_SONGS_MODE || !allowDuplicate) && playlist.tracks.any { it.sameSongAs(track) }) return@withLock playlist
-            // An imported file is playable by definition (it is on disk).
-            if (!track.isLocalFile() && track.youtubeVideoIdOrNull() == null && !innerTube.isPlayable(track.name, track.artist)) return@withLock playlist
-            val updatedTracksJson = json.encodeToString((playlist.tracks + track).map { it.toStored() })
+            // An imported file is playable by definition (it is on disk). If unpinned, try to resolve YouTube ID, but always keep the track.
+            val trackToAdd = if (!track.isLocalFile() && track.youtubeVideoIdOrNull() == null) {
+                runCatching {
+                    innerTube.findBestMatchOrNull(track.name, track.artist, prefetchStreams = false)?.let { match ->
+                        track.copy(
+                            name = track.name.ifBlank { match.title },
+                            artist = track.artist.ifBlank { match.artist },
+                            album = track.album ?: match.album,
+                            artworkUrl = track.artworkUrl ?: match.artworkUrl,
+                            url = "https://music.youtube.com/watch?v=${match.videoId}",
+                        )
+                    }
+                }.getOrNull() ?: track
+            } else {
+                track
+            }
+            val updatedTracksJson = json.encodeToString((playlist.tracks + trackToAdd).map { it.toStored() })
             val updated = entity.copy(tracksJson = updatedTracksJson)
             dao.upsert(updated)
             syncPublicMirror()
@@ -497,8 +528,22 @@ class PlaylistRepository @Inject constructor(
 
     /** Creates the built-in local playlist only when it is genuinely absent. */
     suspend fun ensureLikedSongs(): SavedPlaylist = likedSongsMutex.withLock {
-        getLikedSongs()?.let { return@withLock it }
-        getAll().firstOrNull { it.title.equals(LIKED_SONGS_TITLE, ignoreCase = true) }?.let { legacy ->
+        getLikedSongs()?.let { existing ->
+            // The list was renamed so it cannot be mistaken for YouTube Music's. An older
+            // build called it "Liked Songs": rename that one in place rather than
+            // leaving a second list behind.
+            if (existing.title.equals(LIKED_SONGS_TITLE, ignoreCase = true)) return@withLock existing
+            val entity = dao.getById(existing.id)
+            if (entity != null) {
+                val renamed = entity.copy(title = LIKED_SONGS_TITLE)
+                dao.upsert(renamed)
+                syncPublicMirror()
+                _changes.tryEmit(Unit)
+                return@withLock renamed.toDomain()
+            }
+            return@withLock existing
+        }
+        getAll().firstOrNull { it.title.equals(LEGACY_LIKED_SONGS_TITLE, ignoreCase = true) }?.let { legacy ->
             val entity = dao.getById(legacy.id)
             if (entity != null) {
                 val adopted = entity.copy(
@@ -536,6 +581,42 @@ class PlaylistRepository @Inject constructor(
         syncPublicMirror()
         _changes.tryEmit(Unit)
         return updated.toDomain()
+    }
+
+    /**
+     * Persists a YouTube videoId learned at playback time onto stored rows
+     * holding the same song (Liked Songs, saved playlists). Blank-id rows
+     * always take the id; rows pinned to [replaceVideoId] take it only when
+     * that is exactly the dead id being replaced. Other existing ids are
+     * never overwritten, and the queue is never reordered or dropped.
+     * Serialized through [saveMutex]; best-effort — returns rows updated.
+     */
+    suspend fun pinVideoIdForSong(
+        song: GeneratedTrack,
+        videoId: String,
+        replaceVideoId: String? = null,
+    ): Int {
+        if (videoId.isBlank() || song.name.isBlank()) return 0
+        awaitStartupSync()
+        return saveMutex.withLock {
+            var changed = 0
+            for (entity in dao.getAll()) {
+                val domain = runCatching { entity.toDomain() }.getOrNull() ?: continue
+                val pinned = domain.tracks.map { track ->
+                    val existingId = track.youtubeVideoIdOrNull()
+                    val eligible = !track.isLocalFile() && track.sameSongAs(song) &&
+                        (existingId == null || (replaceVideoId != null && existingId == replaceVideoId))
+                    if (eligible) {
+                        track.copy(url = "https://music.youtube.com/watch?v=$videoId")
+                    } else {
+                        track
+                    }
+                }
+                if (pinned == domain.tracks) continue
+                if (replaceTracksForSync(entity.id, pinned, domain.tracks) != null) changed++
+            }
+            changed
+        }
     }
 
     suspend fun delete(id: Long) {
@@ -584,7 +665,22 @@ class PlaylistRepository @Inject constructor(
         val tracks = try {
             json.decodeFromString<List<StoredTrack>>(tracksJson).map { it.toGenerated() }
         } catch (e: Exception) {
-            emptyList()
+            Log.w(TAG, "Standard decode failed for playlist $id tracks, trying resilient element decode", e)
+            try {
+                val element = json.parseToJsonElement(tracksJson)
+                if (element is JsonArray) {
+                    element.mapNotNull { trackElement ->
+                        runCatching {
+                            json.decodeFromJsonElement(StoredTrack.serializer(), trackElement).toGenerated()
+                        }.getOrNull()
+                    }
+                } else {
+                    emptyList()
+                }
+            } catch (fallbackError: Exception) {
+                Log.e(TAG, "Resilient decode failed for playlist $id tracks", fallbackError)
+                emptyList()
+            }
         }
         return SavedPlaylist(
             id = id,

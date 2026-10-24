@@ -1,5 +1,6 @@
 package com.lastwave.app.data.lyrics
 
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -74,6 +75,31 @@ sealed interface LyricsResult {
     data class Error(val message: String) : LyricsResult
 }
 
+fun providerForSource(source: String?): com.lastwave.app.data.local.LyricsProvider? {
+    if (source.isNullOrBlank()) return null
+    val s = source.lowercase()
+    return when {
+        s.startsWith("lastwave") -> com.lastwave.app.data.local.LyricsProvider.LASTWAVE
+        s.startsWith("lrc.red") -> com.lastwave.app.data.local.LyricsProvider.LRC_RED
+        s.startsWith("apple music") -> com.lastwave.app.data.local.LyricsProvider.APPLE_MUSIC
+        s.startsWith("betterlyrics") -> com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS
+        s.startsWith("qq karaoke") || s.startsWith("portato") -> com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS_PORTATO
+        s.startsWith("kugou") -> com.lastwave.app.data.local.LyricsProvider.KUGOU
+        s.startsWith("syllable-sync") || s.startsWith("bini") -> com.lastwave.app.data.local.LyricsProvider.BINI_LYRICS
+        s.startsWith("video-match") || s.startsWith("simp") -> com.lastwave.app.data.local.LyricsProvider.SIMP_MUSIC
+        s.startsWith("catalog") || s.startsWith("musixmatch") -> com.lastwave.app.data.local.LyricsProvider.MUSIXMATCH
+        s.startsWith("lrclib") -> com.lastwave.app.data.local.LyricsProvider.LRCLIB
+        s.startsWith("lyricsplus") -> com.lastwave.app.data.local.LyricsProvider.LYRICS_PLUS
+        s.startsWith("unison") -> com.lastwave.app.data.local.LyricsProvider.UNISON
+        s.startsWith("youtube captions") -> com.lastwave.app.data.local.LyricsProvider.YOUTUBE_CAPTIONS
+        s.startsWith("youtube music") -> com.lastwave.app.data.local.LyricsProvider.YOUTUBE_MUSIC
+        s.startsWith("megalobiz") -> com.lastwave.app.data.local.LyricsProvider.MEGALOBIZ
+        s.startsWith("spotify") -> com.lastwave.app.data.local.LyricsProvider.SPOTIFY
+        s.startsWith("genius") -> com.lastwave.app.data.local.LyricsProvider.GENIUS
+        else -> null
+    }
+}
+
 @Singleton
 class LyricsRepository @Inject constructor(
     private val betterLyricsApi: BetterLyricsApi,
@@ -82,8 +108,15 @@ class LyricsRepository @Inject constructor(
     private val appleMusicApi: AppleMusicLyricsApi,
     private val lastWaveLyricsApi: LastWaveLyricsApi,
     private val biniApi: BiniLyricsApi,
+    private val lrcRedLyricsApi: LrcRedLyricsApi,
     private val simpMusicApi: SimpMusicLyricsApi,
     private val musixmatchApi: MusixmatchLyricsApi,
+    private val lyricsPlusApi: LyricsPlusLyricsApi,
+    private val unisonApi: UnisonLyricsApi,
+    private val youtubeLyricsApi: YouTubeLyricsApi,
+    private val geniusLyricsApi: GeniusLyricsApi,
+    private val megalobizLyricsApi: MegalobizLyricsApi,
+    private val spotifyLyricsApi: SpotifyLyricsApi,
     private val settingsPreferences: com.lastwave.app.data.local.SettingsPreferences,
     private val downloadedTrackDao: dagger.Lazy<com.lastwave.app.data.local.db.DownloadedTrackDao>,
 ) {
@@ -108,9 +141,13 @@ class LyricsRepository @Inject constructor(
         isrc: String? = null,
         /** Local songs: `.lrc` imported next to the audio file; wins over every provider. */
         localLrcPath: String? = null,
+        overrideProvider: com.lastwave.app.data.local.LyricsProvider? = null,
+        excludedProviders: Set<com.lastwave.app.data.local.LyricsProvider> = emptySet(),
         onPartialResult: suspend (LyricsResult.Success) -> Unit = {},
     ): LyricsResult = withContext(Dispatchers.Default) {
-        if (!localLrcPath.isNullOrBlank()) {
+        val skipLocal = (overrideProvider != null && overrideProvider != com.lastwave.app.data.local.LyricsProvider.AUTO) ||
+            excludedProviders.isNotEmpty()
+        if (!skipLocal && !localLrcPath.isNullOrBlank()) {
             val lrc = runCatching {
                 java.io.File(localLrcPath).takeIf { it.isFile && it.length() > 0 }?.readText()
             }.getOrNull()
@@ -133,11 +170,13 @@ class LyricsRepository @Inject constructor(
         // User-chosen provider order: tried first, automatic fallback to the
         // rest when it returns nothing. Part of the cache key so switching
         // providers never serves the previous provider's result.
-        val preferred = runCatching {
+        val defaultPref = runCatching {
             settingsPreferences.settings.first().lyricsProvider
         }.getOrDefault(com.lastwave.app.data.local.LyricsProvider.AUTO)
+        val preferred = if (excludedProviders.contains(defaultPref)) com.lastwave.app.data.local.LyricsProvider.AUTO else defaultPref
         val effectiveVideoId = videoId?.trim()?.takeIf { it.isNotBlank() }
-        val cacheKey = "${effectiveVideoId ?: ""}|${artist.trim().lowercase()}|${title.trim().lowercase()}|${album?.trim()?.lowercase()}|$durationSeconds|$wordByWord|${preferred.id}"
+        val excludedKey = excludedProviders.map { it.id }.sorted().joinToString(",")
+        val cacheKey = "${effectiveVideoId ?: ""}|${artist.trim().lowercase()}|${title.trim().lowercase()}|${album?.trim()?.lowercase()}|$durationSeconds|$wordByWord|${preferred.id}|${overrideProvider?.id ?: ""}|$excludedKey"
         // Bounded: a long session must not grow this map without limit.
         // Eviction is coarse (oldest-first is untracked); a miss re-fetches
         // in milliseconds, so dropping hot entries only costs one fetch.
@@ -151,39 +190,59 @@ class LyricsRepository @Inject constructor(
         }
 
         var localLyrics: LyricsResult.Success? = null
-        run {
-            // 0. LOCAL OFFLINE: Check if this track is downloaded with embedded or saved lyrics.
-            // "Artist - Title" and "Title (feat. X)" variants must still hit the
-            // same row, otherwise a correct offline copy is skipped and a
-            // wrong online hit is served instead.
-            val localTrack = runCatching {
-                val dao = downloadedTrackDao.get()
-                dao.findByTitleAndArtist(title, artist)
-                    ?: dao.findByTrackKey("${artist.lowercase()}_${title.lowercase()}")
-                    ?: run {
-                        val ct = LrclibLyricsApi.cleanTrackTitle(title)
-                        val ca = LrclibLyricsApi.cleanArtistName(artist)
-                        if (ct != title || ca != artist) dao.findByTitleAndArtist(ct, ca) else null
+        if (!skipLocal) {
+            run {
+                // 0. LOCAL OFFLINE: Check if this track is downloaded with embedded or saved lyrics.
+                // "Artist - Title" and "Title (feat. X)" variants must still hit the
+                // same row, otherwise a correct offline copy is skipped and a
+                // wrong online hit is served instead.
+                val localTrack = runCatching {
+                    val dao = downloadedTrackDao.get()
+                    dao.findByTitleAndArtist(title, artist)
+                        ?: dao.findByTrackKey("${artist.lowercase()}_${title.lowercase()}")
+                        ?: run {
+                            val ct = LrclibLyricsApi.cleanTrackTitle(title)
+                            val ca = LrclibLyricsApi.cleanArtistName(artist)
+                            if (ct != title || ca != artist) dao.findByTitleAndArtist(ct, ca) else null
+                        }
+                }.getOrNull()
+                if (localTrack != null && (localTrack.hasLyrics || !localTrack.plainLyrics.isNullOrBlank() || !localTrack.syncedLyrics.isNullOrBlank() || !localTrack.lrcFilePath.isNullOrBlank())) {
+                    var synced = localTrack.syncedLyrics
+                    if (synced.isNullOrBlank() && !localTrack.lrcFilePath.isNullOrBlank()) {
+                        val lrcFile = java.io.File(localTrack.lrcFilePath)
+                        if (lrcFile.exists() && lrcFile.length() > 0) {
+                            synced = runCatching { lrcFile.readText() }.getOrNull()
+                        }
                     }
-            }.getOrNull()
-            if (localTrack != null && (localTrack.hasLyrics || !localTrack.plainLyrics.isNullOrBlank() || !localTrack.syncedLyrics.isNullOrBlank() || !localTrack.lrcFilePath.isNullOrBlank())) {
-                var synced = localTrack.syncedLyrics
-                if (synced.isNullOrBlank() && !localTrack.lrcFilePath.isNullOrBlank()) {
-                    val lrcFile = java.io.File(localTrack.lrcFilePath)
-                    if (lrcFile.exists() && lrcFile.length() > 0) {
-                        synced = runCatching { lrcFile.readText() }.getOrNull()
+                    if (!synced.isNullOrBlank()) {
+                        val lines = parseLrc(synced)
+                        if (lines.isNotEmpty()) {
+                            val result = LyricsResult.Success(
+                                lines = lines,
+                                isSynced = true,
+                                isWordSynced = lines.any { it.hasSyllables },
+                                plainLyrics = localTrack.plainLyrics,
+                                isInstrumental = false,
+                                source = "Downloaded Lyrics (LRC)",
+                            )
+                            if (!wordByWord) {
+                                cache[cacheKey] = result
+                                return@withContext result
+                            }
+                            localLyrics = result
+                            onPartialResult(result)
+                            return@run
+                        }
                     }
-                }
-                if (!synced.isNullOrBlank()) {
-                    val lines = parseLrc(synced)
-                    if (lines.isNotEmpty()) {
+                    val plain = localTrack.plainLyrics
+                    if (!plain.isNullOrBlank()) {
                         val result = LyricsResult.Success(
-                            lines = lines,
-                            isSynced = true,
-                            isWordSynced = lines.any { it.hasSyllables },
-                            plainLyrics = localTrack.plainLyrics,
+                            lines = emptyList(),
+                            isSynced = false,
+                            isWordSynced = false,
+                            plainLyrics = plain.trim(),
                             isInstrumental = false,
-                            source = "Downloaded Lyrics (LRC)",
+                            source = "Downloaded Lyrics (Plain)",
                         )
                         if (!wordByWord) {
                             cache[cacheKey] = result
@@ -191,25 +250,7 @@ class LyricsRepository @Inject constructor(
                         }
                         localLyrics = result
                         onPartialResult(result)
-                        return@run
                     }
-                }
-                val plain = localTrack.plainLyrics
-                if (!plain.isNullOrBlank()) {
-                    val result = LyricsResult.Success(
-                        lines = emptyList(),
-                        isSynced = false,
-                        isWordSynced = false,
-                        plainLyrics = plain.trim(),
-                        isInstrumental = false,
-                        source = "Downloaded Lyrics (Plain)",
-                    )
-                    if (!wordByWord) {
-                        cache[cacheKey] = result
-                        return@withContext result
-                    }
-                    localLyrics = result
-                    onPartialResult(result)
                 }
             }
         }
@@ -239,12 +280,37 @@ class LyricsRepository @Inject constructor(
             }
         }
 
+        // On-the-spot specific provider override: if the user explicitly picked
+        // an individual provider, query only that provider directly.
+        if (overrideProvider != null && overrideProvider != com.lastwave.app.data.local.LyricsProvider.AUTO) {
+            val directHit = if (overrideProvider == com.lastwave.app.data.local.LyricsProvider.LRCLIB) {
+                fetchFromLrclib(title, artist, album, durationSeconds)
+            } else {
+                fetchPreferredWord(
+                    preferred = overrideProvider,
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    durationSeconds = durationSeconds,
+                    videoId = effectiveVideoId,
+                    isrc = recordingIsrc,
+                    biniHit = biniHit,
+                )
+            }
+            if (directHit != null) {
+                cache[cacheKey] = directHit
+                return@withContext directHit
+            } else {
+                return@withContext LyricsResult.Empty
+            }
+        }
+
         // LRCLIB chosen explicitly: try it before the word providers so
         // the preference is honored. Word-sync found later still wins;
         // its line-sync result outranks every other fallback below.
         var lrclibAttempted = false
         var preferredFallback: LyricsResult.Success? = null
-        if (preferred == com.lastwave.app.data.local.LyricsProvider.LRCLIB) {
+        if (preferred == com.lastwave.app.data.local.LyricsProvider.LRCLIB && !excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.LRCLIB)) {
             lrclibAttempted = true
             val first = fetchFromLrclib(title, artist, album, durationSeconds)
             if (first != null) {
@@ -262,7 +328,7 @@ class LyricsRepository @Inject constructor(
             // word-sync (or instrumental) short-circuits; its line-sync
             // result is stashed as the top fallback so a word-synced hit
             // from anywhere else still wins.
-            if (preferred.isWordProvider) {
+            if (preferred.isWordProvider && !excludedProviders.contains(preferred)) {
                 val single = withTimeoutOrNull(PREFERRED_HEAD_START_MS) {
                     fetchPreferredWord(
                         preferred = preferred,
@@ -290,58 +356,78 @@ class LyricsRepository @Inject constructor(
             var lineFallback: LyricsResult.Success? = null
             val wordResult = withTimeoutOrNull(RACE_TOTAL_MS) {
                 coroutineScope {
-                    val requests = mutableListOf(
-                    async<LyricsResult.Success?> {
-                        fetchWordFromLastWave(title, artist, album, durationSeconds, recordingIsrc, effectiveVideoId)
-                    },
-                    async<LyricsResult.Success?> {
-                        fetchWordFromAppleMusic(title, artist, album, durationSeconds)
-                    },
-                    async<LyricsResult.Success?> {
-                        fetchWordFromBini(title, artist, album, durationSeconds, recordingIsrc, biniHit, effectiveVideoId)
-                    },
-                    async<LyricsResult.Success?> {
-                        fetchWordFromBetterLyrics(title, artist, album, durationSeconds)
-                    },
-                    async<LyricsResult.Success?> {
-                        fetchWordFromKugou(title, artist, durationSeconds)
-                    },
-                    async<LyricsResult.Success?> {
-                        fetchWordFromSimpMusic(effectiveVideoId, durationSeconds)
-                    },
-                )
-                try {
-                    while (requests.isNotEmpty()) {
-                        val (request, result) = select {
-                            requests.forEach { request ->
-                                request.onAwait { request to it }
-                            }
-                        }
-                        requests.remove(request)
-                        if (result?.isWordSynced == true) {
-                            // Fastest word-sync wins — but only if its
-                            // timeline plausibly fits this recording. A
-                            // wrong-cut hit keeps racing as a line fallback
-                            // instead of locking in broken sync.
-                            if (result.isInstrumental || plausibleDuration(result.lines, durationSeconds)) {
-                                return@coroutineScope result
-                            }
-                        }
-                        // Line-sync fallback must also fit the recording: an
-                        // unchecked wrong-cut timeline is exactly how plain
-                        // line-by-line sync breaks.
-                        if (result != null && lineFallback == null &&
-                            (result.isInstrumental || plausibleDuration(result.lines, durationSeconds))
-                        ) {
-                            lineFallback = result
-                            onPartialResult(result)
-                        }
+                    val requests = mutableListOf<Deferred<LyricsResult.Success?>>()
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.LASTWAVE)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromLastWave(title, artist, album, durationSeconds, recordingIsrc, effectiveVideoId) })
                     }
-                    lineFallback
-                } finally {
-                    requests.forEach { it.cancel() }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.LRC_RED)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromLrcRed(title, artist, album, durationSeconds, recordingIsrc, biniHit, effectiveVideoId) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.APPLE_MUSIC)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromAppleMusic(title, artist, album, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.BINI_LYRICS)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromBini(title, artist, album, durationSeconds, recordingIsrc, biniHit, effectiveVideoId) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromBetterLyrics(title, artist, album, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.KUGOU)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromKugou(title, artist, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.SIMP_MUSIC)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromSimpMusic(effectiveVideoId, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS_PORTATO)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromPortato(title, artist, album, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.LYRICS_PLUS)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromLyricsPlus(title, artist, album, durationSeconds, recordingIsrc) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.UNISON)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromUnison(title, artist, album, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.YOUTUBE_CAPTIONS)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromYouTubeCaptions(effectiveVideoId, durationSeconds) })
+                    }
+                    if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.SPOTIFY)) {
+                        requests.add(async<LyricsResult.Success?> { fetchWordFromSpotify(title, artist, durationSeconds) })
+                    }
+                    if (requests.isEmpty()) {
+                        return@coroutineScope null
+                    }
+                    try {
+                        while (requests.isNotEmpty()) {
+                            val (request, result) = select<Pair<Deferred<LyricsResult.Success?>, LyricsResult.Success?>> {
+                                requests.forEach { req ->
+                                    req.onAwait { res -> req to res }
+                                }
+                            }
+                            requests.remove(request)
+                            if (result?.isWordSynced == true) {
+                                // Fastest word-sync wins — but only if its
+                                // timeline plausibly fits this recording. A
+                                // wrong-cut hit keeps racing as a line fallback
+                                // instead of locking in broken sync.
+                                if (result.isInstrumental || plausibleDuration(result.lines, durationSeconds)) {
+                                    return@coroutineScope result
+                                }
+                            }
+                            // Line-sync fallback must also fit the recording: an
+                            // unchecked wrong-cut timeline is exactly how plain
+                            // line-by-line sync breaks.
+                            if (result != null && lineFallback == null &&
+                                (result.isInstrumental || plausibleDuration(result.lines, durationSeconds))
+                            ) {
+                                lineFallback = result
+                                onPartialResult(result)
+                            }
+                        }
+                        lineFallback
+                    } finally {
+                        requests.forEach { it.cancel() }
+                    }
                 }
-            }
             }
             if (wordResult?.isWordSynced == true) {
                 cache[cacheKey] = wordResult
@@ -361,9 +447,17 @@ class LyricsRepository @Inject constructor(
             }
             // Extra line-sync catalogue: biggest database, tried after the
             // word race so a timed hit from anywhere above still wins.
-            fetchWordFromMusixmatch(title, artist, durationSeconds)?.let { mxm ->
-                cache[cacheKey] = mxm
-                return@withContext mxm
+            if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.MUSIXMATCH)) {
+                fetchWordFromMusixmatch(title, artist, durationSeconds)?.let { mxm ->
+                    cache[cacheKey] = mxm
+                    return@withContext mxm
+                }
+            }
+            if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.SPOTIFY)) {
+                fetchWordFromSpotify(title, artist, durationSeconds)?.let { sp ->
+                    cache[cacheKey] = sp
+                    return@withContext sp
+                }
             }
         }
         localLyrics?.let {
@@ -374,7 +468,7 @@ class LyricsRepository @Inject constructor(
 
         // Fall back to LRCLIB line-by-line sync (skipped when it was
         // already tried as the preferred provider above).
-        if (!lrclibAttempted) {
+        if (!lrclibAttempted && !excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.LRCLIB)) {
             fetchFromLrclib(title, artist, album, durationSeconds)?.let { result ->
                 // A local synced copy outranks a remote plain-only hit:
                 // keep scrolling lines over static text.
@@ -399,7 +493,29 @@ class LyricsRepository @Inject constructor(
             return@withContext it
         }
 
-        // 4. FALLBACK: If all fail, return Empty (no lyrics)
+        // 4. LAST RESORTS: community-scraped line-sync, then the video's own
+        // plain text (exact cut, no timing), then the web catalogue. Reached
+        // only when every timed source above found nothing.
+        if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.MEGALOBIZ)) {
+            fetchWordFromMegalobiz(title, artist, durationSeconds)?.let { scraped ->
+                cache[cacheKey] = scraped
+                return@withContext scraped
+            }
+        }
+        if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.YOUTUBE_MUSIC)) {
+            fetchPlainFromYouTubeMusic(effectiveVideoId)?.let { videoLyrics ->
+                cache[cacheKey] = videoLyrics
+                return@withContext videoLyrics
+            }
+        }
+        if (!excludedProviders.contains(com.lastwave.app.data.local.LyricsProvider.GENIUS)) {
+            fetchPlainFromGenius(title, artist)?.let { webLyrics ->
+                cache[cacheKey] = webLyrics
+                return@withContext webLyrics
+            }
+        }
+
+        // 5. FALLBACK: If all fail, return Empty (no lyrics)
         LyricsResult.Empty
     }
 
@@ -474,6 +590,8 @@ class LyricsRepository @Inject constructor(
     ): LyricsResult.Success? = when (preferred) {
         com.lastwave.app.data.local.LyricsProvider.LASTWAVE ->
             fetchWordFromLastWave(title, artist, album, durationSeconds, isrc, videoId)
+        com.lastwave.app.data.local.LyricsProvider.LRC_RED ->
+            fetchWordFromLrcRed(title, artist, album, durationSeconds, isrc, biniHit, videoId)
         com.lastwave.app.data.local.LyricsProvider.APPLE_MUSIC ->
             fetchWordFromAppleMusic(title, artist, album, durationSeconds)
         com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS ->
@@ -486,8 +604,32 @@ class LyricsRepository @Inject constructor(
             fetchWordFromMusixmatch(title, artist, durationSeconds)
         com.lastwave.app.data.local.LyricsProvider.BINI_LYRICS ->
             fetchWordFromBini(title, artist, album, durationSeconds, isrc, biniHit, videoId)
+        com.lastwave.app.data.local.LyricsProvider.BETTER_LYRICS_PORTATO ->
+            fetchWordFromPortato(title, artist, album, durationSeconds)
+        com.lastwave.app.data.local.LyricsProvider.LYRICS_PLUS ->
+            fetchWordFromLyricsPlus(title, artist, album, durationSeconds, isrc)
+        com.lastwave.app.data.local.LyricsProvider.UNISON ->
+            fetchWordFromUnison(title, artist, album, durationSeconds)
+        com.lastwave.app.data.local.LyricsProvider.YOUTUBE_CAPTIONS ->
+            fetchWordFromYouTubeCaptions(videoId, durationSeconds)
+        com.lastwave.app.data.local.LyricsProvider.YOUTUBE_MUSIC ->
+            fetchPlainFromYouTubeMusic(videoId)
+        com.lastwave.app.data.local.LyricsProvider.MEGALOBIZ ->
+            fetchWordFromMegalobiz(title, artist, durationSeconds)
+        com.lastwave.app.data.local.LyricsProvider.SPOTIFY ->
+            fetchWordFromSpotify(title, artist, durationSeconds)
+        com.lastwave.app.data.local.LyricsProvider.GENIUS ->
+            fetchPlainFromGenius(title, artist)
         else -> null
     }
+
+    private suspend fun fetchWordFromSpotify(
+        title: String,
+        artist: String,
+        durationSeconds: Int?,
+    ): LyricsResult.Success? = runCatching {
+        spotifyLyricsApi.fetchLyrics(title, artist, durationSeconds)
+    }.getOrNull()
 
     private suspend fun fetchWordFromLastWave(
         title: String,
@@ -510,6 +652,41 @@ class LyricsRepository @Inject constructor(
                 album,
                 durationSeconds,
                 isrc,
+            ) ?: return null
+
+            foundIsrc?.takeIf { it.isNotBlank() }?.let { rememberIsrc(videoId, it) }
+            res.takeIf { it.isInstrumental || plausibleDuration(it.lines, durationSeconds) }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun fetchWordFromLrcRed(
+        title: String,
+        artist: String,
+        album: String?,
+        durationSeconds: Int?,
+        isrc: String?,
+        hit: BiniHit?,
+        videoId: String? = null,
+    ): LyricsResult.Success? {
+        return try {
+            val (foundIsrc, res) = lrcRedLyricsApi.fetchLyricsWithIsrc(
+                forSearchTitle(title),
+                forSearchArtist(artist),
+                album,
+                durationSeconds,
+                isrc,
+                hit,
+            ) ?: lrcRedLyricsApi.fetchLyricsWithIsrc(
+                title,
+                artist,
+                album,
+                durationSeconds,
+                isrc,
+                hit,
             ) ?: return null
 
             foundIsrc?.takeIf { it.isNotBlank() }?.let { rememberIsrc(videoId, it) }
@@ -617,6 +794,203 @@ class LyricsRepository @Inject constructor(
                     source = "Catalog (Line-Sync)",
                 )
             }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** QQ Music karaoke timings through BetterLyrics' Portato endpoint. */
+    private suspend fun fetchWordFromPortato(
+        title: String,
+        artist: String,
+        album: String? = null,
+        durationSeconds: Int? = null,
+    ): LyricsResult.Success? {
+        try {
+            val portatoLines = betterLyricsApi.fetchPortatoLyrics(
+                forSearchTitle(title),
+                forSearchArtist(artist),
+                durationSeconds,
+                album,
+            ) ?: betterLyricsApi.fetchPortatoLyrics(title, artist, durationSeconds, album)
+            if (!portatoLines.isNullOrEmpty()) {
+                // TTML carries no candidate identity: duration plausibility only.
+                if (!plausibleDuration(portatoLines, durationSeconds)) return null
+                val hasWordTiming = portatoLines.any { it.hasSyllables }
+                return LyricsResult.Success(
+                    lines = portatoLines,
+                    isSynced = true,
+                    isWordSynced = hasWordTiming,
+                    plainLyrics = portatoLines.joinToString("\n") { it.text },
+                    isInstrumental = false,
+                    source = if (hasWordTiming) "QQ Karaoke (Word-Sync)" else "QQ Karaoke (Line-Sync)",
+                )
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** The YouLy+ backend's syllable timings, raced across its mirrors. */
+    private suspend fun fetchWordFromLyricsPlus(
+        title: String,
+        artist: String,
+        album: String?,
+        durationSeconds: Int?,
+        isrc: String?,
+    ): LyricsResult.Success? {
+        try {
+            val lines = lyricsPlusApi.fetchLyrics(
+                forSearchTitle(title),
+                forSearchArtist(artist),
+                durationSeconds,
+                album,
+                isrc,
+            ) ?: lyricsPlusApi.fetchLyrics(title, artist, durationSeconds, album, isrc)
+            if (!lines.isNullOrEmpty()) {
+                if (!plausibleDuration(lines, durationSeconds)) return null
+                val hasWordTiming = lines.any { it.hasSyllables }
+                return LyricsResult.Success(
+                    lines = lines,
+                    isSynced = true,
+                    isWordSynced = hasWordTiming,
+                    plainLyrics = lines.joinToString("\n") { it.text },
+                    isInstrumental = false,
+                    source = if (hasWordTiming) "LyricsPlus (Word-Sync)" else "LyricsPlus (Line-Sync)",
+                )
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** The community-submitted database; thin, but sometimes the only hit. */
+    private suspend fun fetchWordFromUnison(
+        title: String,
+        artist: String,
+        album: String?,
+        durationSeconds: Int?,
+    ): LyricsResult.Success? {
+        try {
+            val lines = unisonApi.fetchLyrics(
+                forSearchTitle(title),
+                forSearchArtist(artist),
+                durationSeconds,
+                album,
+            ) ?: unisonApi.fetchLyrics(title, artist, durationSeconds, album)
+            if (!lines.isNullOrEmpty()) {
+                if (!plausibleDuration(lines, durationSeconds)) return null
+                val hasWordTiming = lines.any { it.hasSyllables }
+                return LyricsResult.Success(
+                    lines = lines,
+                    isSynced = true,
+                    isWordSynced = hasWordTiming,
+                    plainLyrics = lines.joinToString("\n") { it.text },
+                    isInstrumental = false,
+                    source = if (hasWordTiming) "Unison (Word-Sync)" else "Unison (Line-Sync)",
+                )
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** Timed captions of the playing video: line-synced, never the wrong cut. */
+    private suspend fun fetchWordFromYouTubeCaptions(
+        videoId: String?,
+        durationSeconds: Int?,
+    ): LyricsResult.Success? {
+        try {
+            val lines = youtubeLyricsApi.fetchCaptionLines(videoId) ?: return null
+            if (lines.isEmpty()) return null
+            if (!plausibleDuration(lines, durationSeconds)) return null
+            return LyricsResult.Success(
+                lines = lines,
+                isSynced = true,
+                isWordSynced = false,
+                plainLyrics = lines.joinToString("\n") { it.text },
+                isInstrumental = false,
+                source = "YouTube Captions (Line-Sync)",
+            )
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** Community-made line-synced LRC, scraped from Megalobiz. */
+    private suspend fun fetchWordFromMegalobiz(
+        title: String,
+        artist: String,
+        durationSeconds: Int?,
+    ): LyricsResult.Success? {
+        try {
+            val lines = megalobizLyricsApi.fetchLyrics(forSearchTitle(title), forSearchArtist(artist))
+                ?: megalobizLyricsApi.fetchLyrics(title, artist)
+            if (!lines.isNullOrEmpty()) {
+                if (!plausibleDuration(lines, durationSeconds)) return null
+                return LyricsResult.Success(
+                    lines = lines,
+                    isSynced = true,
+                    isWordSynced = lines.any { it.hasSyllables },
+                    plainLyrics = lines.joinToString("\n") { it.text },
+                    isInstrumental = false,
+                    source = "Megalobiz (Line-Sync)",
+                )
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** Plain lyrics from the playing video's YouTube Music Lyrics tab. */
+    private suspend fun fetchPlainFromYouTubeMusic(videoId: String?): LyricsResult.Success? {
+        try {
+            val text = youtubeLyricsApi.fetchMusicTabLyrics(videoId) ?: return null
+            return LyricsResult.Success(
+                lines = emptyList(),
+                isSynced = false,
+                isWordSynced = false,
+                plainLyrics = text,
+                isInstrumental = false,
+                source = "YouTube Music (Plain)",
+            )
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** Plain text from the Genius web catalogue; the scrape is slow, so it
+     *  is only reached when everything timed has missed. */
+    private suspend fun fetchPlainFromGenius(
+        title: String,
+        artist: String,
+    ): LyricsResult.Success? {
+        try {
+            val text = geniusLyricsApi.fetchLyrics(forSearchTitle(title), forSearchArtist(artist))
+                ?: geniusLyricsApi.fetchLyrics(title, artist)
+                ?: return null
+            return LyricsResult.Success(
+                lines = emptyList(),
+                isSynced = false,
+                isWordSynced = false,
+                plainLyrics = text,
+                isInstrumental = false,
+                source = "Genius (Plain)",
+            )
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (_: Exception) {

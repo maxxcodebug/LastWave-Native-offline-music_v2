@@ -7,6 +7,7 @@ import com.lastwave.app.data.local.SessionPreferences
 import com.lastwave.app.data.music.InnerTubeMusicApi
 import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.network.LastFmApiService
+import com.lastwave.app.data.repository.RelatedGraphRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
@@ -22,7 +23,7 @@ import java.net.URLEncoder
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class SearchTab { TRACKS, ARTISTS, ALBUMS, PLAYLISTS, USERS }
+enum class SearchTab { TRACKS, PODCASTS, ARTISTS, ALBUMS, PLAYLISTS, USERS }
 
 @Immutable
 data class SearchResultItem(
@@ -45,36 +46,56 @@ class SearchRepository @Inject constructor(
     private val api: LastFmApiService,
     private val sessionPreferences: SessionPreferences,
     private val innerTube: InnerTubeMusicApi,
+    private val relatedGraph: RelatedGraphRepository,
     private val http: OkHttpClient,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val searchCache = object : LinkedHashMap<String, List<SearchResultItem>>(80, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SearchResultItem>>?): Boolean {
+            return size > 80
+        }
+    }
+    private val cacheLock = Any()
 
     suspend fun getSuggestions(query: String): List<String> = withContext(Dispatchers.IO) {
         val trimmed = query.trim()
         if (trimmed.isBlank()) return@withContext emptyList()
-        val url = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${URLEncoder.encode(trimmed, "UTF-8")}"
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", YOUTUBE_WEB_USER_AGENT)
-            .build()
-        try {
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext emptyList()
-                val body = response.body?.string() ?: return@withContext emptyList()
-                val array = json.parseToJsonElement(body) as? JsonArray ?: return@withContext emptyList()
-                if (array.size < 2) return@withContext emptyList()
-                val suggestions = array[1] as? JsonArray ?: return@withContext emptyList()
-                suggestions.mapNotNull { (it as? JsonPrimitive)?.content }
+        val urls = listOf(
+            "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${URLEncoder.encode(trimmed, "UTF-8")}",
+            "https://suggestqueries-clients6.youtube.com/complete/search?client=firefox&ds=yt&q=${URLEncoder.encode(trimmed, "UTF-8")}",
+        )
+        for (url in urls) {
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", YOUTUBE_WEB_USER_AGENT)
+                .build()
+            try {
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = response.body?.string() ?: return@use
+                    val array = json.parseToJsonElement(body) as? JsonArray ?: return@use
+                    if (array.size < 2) return@use
+                    val suggestions = array[1] as? JsonArray ?: return@use
+                    val parsed = suggestions.mapNotNull { (it as? JsonPrimitive)?.content }
+                    if (parsed.isNotEmpty()) return@withContext parsed
+                }
+            } catch (_: Exception) {
+                // Try alternate suggestion endpoint
             }
-        } catch (e: Exception) {
-            emptyList()
         }
+        emptyList()
     }
 
     suspend fun search(tab: SearchTab, query: String): List<SearchResultItem> {
-        if (query.isBlank()) return emptyList()
-        return when (tab) {
-            SearchTab.TRACKS -> innerTube.searchSongs(query).map { track ->
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return emptyList()
+        val cacheKey = "${tab.name}:${trimmed.lowercase()}"
+        synchronized(cacheLock) {
+            searchCache[cacheKey]?.let { return it }
+        }
+
+        val results = when (tab) {
+            SearchTab.TRACKS -> innerTube.searchSongs(trimmed).map { track ->
                 SearchResultItem(
                     name = track.title,
                     artist = track.artist,
@@ -84,7 +105,7 @@ class SearchRepository @Inject constructor(
                     entityId = track.videoId,
                 )
             }
-            SearchTab.ARTISTS -> innerTube.searchArtists(query).map { artist ->
+            SearchTab.ARTISTS -> innerTube.searchArtists(trimmed).map { artist ->
                 SearchResultItem(
                     name = artist.name,
                     artworkUrl = artist.artworkUrl,
@@ -92,7 +113,7 @@ class SearchRepository @Inject constructor(
                     entityId = artist.browseId,
                 )
             }
-            SearchTab.ALBUMS -> innerTube.searchAlbums(query).map { album ->
+            SearchTab.ALBUMS -> innerTube.searchAlbums(trimmed).map { album ->
                 SearchResultItem(
                     name = album.name,
                     artist = album.artist,
@@ -101,7 +122,7 @@ class SearchRepository @Inject constructor(
                     entityId = album.browseId,
                 )
             }
-            SearchTab.PLAYLISTS -> innerTube.searchPlaylists(query).map { playlist ->
+            SearchTab.PLAYLISTS -> innerTube.searchPlaylists(trimmed).map { playlist ->
                 SearchResultItem(
                     name = playlist.title,
                     artist = playlist.author,
@@ -110,12 +131,32 @@ class SearchRepository @Inject constructor(
                     entityId = playlist.id,
                 )
             }
+            SearchTab.PODCASTS -> innerTube.searchPodcasts(trimmed).map { episode ->
+                SearchResultItem(
+                    name = episode.title,
+                    artist = episode.showTitle ?: "Podcast",
+                    artworkUrl = episode.artworkUrl,
+                    subtitle = listOfNotNull(episode.showTitle, episode.publishedLabel)
+                        .filter(String::isNotBlank)
+                        .joinToString(" • ")
+                        .ifBlank { "Podcast" },
+                    videoId = episode.videoId,
+                    entityId = episode.videoId,
+                )
+            }
             // No shared key: user search needs a personal key, otherwise empty.
             SearchTab.USERS -> {
                 val key = sessionPreferences.session.first().apiKey
-                if (key.isBlank()) emptyList() else lookupUser(key, query)
+                if (key.isBlank()) emptyList() else lookupUser(key, trimmed)
             }
         }.filter { it.name.isNotBlank() }
+
+        if (results.isNotEmpty()) {
+            synchronized(cacheLock) {
+                searchCache[cacheKey] = results
+            }
+        }
+        return results
     }
 
     /** Returns the native-playable tracks behind a YT Music artist/album result. */
@@ -138,7 +179,7 @@ class SearchRepository @Inject constructor(
 
             val related = if (!videoId.isNullOrBlank()) {
                 try {
-                    innerTube.fetchRelatedSongs(videoId, limit = limit * 2, prefetchStreams = false)
+                    relatedGraph.relatedFor(videoId, limit = limit * 2, prefetchStreams = false, forceNetwork = true)
                 } catch (_: Exception) {
                     emptyList()
                 }

@@ -1,7 +1,10 @@
 package com.lastwave.app.data.ytmusic
 
 import android.util.Log
+import android.webkit.CookieManager
+import android.webkit.WebStorage
 import java.security.MessageDigest
+import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -10,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -102,10 +107,25 @@ class YtMusicAuthManager @Inject constructor(
         )
     }
 
-    /** Clears cookies + identity AND the local→remote mapping table, so a
-     *  later reconnect starts clean instead of writing into stale playlists
-     *  owned by whoever signed in previously. */
-    suspend fun signOut() = preferences.clearConnection()
+    /** Clears cookies + identity AND the local→remote mapping table, and
+     *  wipes the WebView's own cookie jar so a later sign-in can never
+     *  auto-capture the previous account's stale session. */
+    suspend fun signOut() {
+        _connection.value = YtConnection.DISCONNECTED
+        preferences.clearConnection()
+        runCatching {
+            withContext(Dispatchers.Main) {
+                val cm = CookieManager.getInstance()
+                suspendCancellableCoroutine<Boolean> { cont ->
+                    cm.removeAllCookies { result ->
+                        if (cont.isActive) cont.resume(result)
+                    }
+                }
+                cm.flush()
+                WebStorage.getInstance().deleteAllData()
+            }
+        }
+    }
 
     /**
      * Attempts to read updated session cookies from Android's system CookieManager.
@@ -114,8 +134,11 @@ class YtMusicAuthManager @Inject constructor(
      * Returns true if fresh cookies were found and saved.
      */
     suspend fun refreshCookiesFromCookieManager(): Boolean {
+        val current = connection.value
+        if (!current.isConnected) return false
+
         return try {
-            val cm = android.webkit.CookieManager.getInstance()
+            val cm = CookieManager.getInstance()
             val musicCookies = cm.getCookie("https://music.youtube.com").orEmpty()
             val ytCookies = cm.getCookie("https://www.youtube.com").orEmpty()
             val combined = when {
@@ -129,8 +152,7 @@ class YtMusicAuthManager @Inject constructor(
             val hasLogin = cookies.containsKey("LOGIN_INFO")
             if (!hasSapisid || !hasLogin) return false
 
-            val current = connection.value
-            if (current.isConnected && current.cookies == cookies) return false
+            if (current.cookies == cookies) return false
 
             preferences.saveConnection(
                 cookies = cookies,

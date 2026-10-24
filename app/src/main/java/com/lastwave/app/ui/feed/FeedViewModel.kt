@@ -13,11 +13,15 @@ import com.lastwave.app.data.generate.youtubeVideoIdOrNull
 import com.lastwave.app.data.local.SessionPreferences
 import com.lastwave.app.data.local.SettingsPreferences
 import com.lastwave.app.data.model.RecentTrack
+import com.lastwave.app.data.music.HomeChip
+import com.lastwave.app.data.music.HomeShelf
+import com.lastwave.app.data.music.HomeShelfItem
 import com.lastwave.app.data.music.InnerTubeMusicApi
 import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.music.YouTubePlaylistSummary
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.PlayableTrack
+import com.lastwave.app.data.repository.RelatedGraphRepository
 import com.lastwave.app.data.ytmusic.YtMusicAuthManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -27,6 +31,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -45,15 +50,28 @@ data class FeedUiState(
     val error: String? = null,
     val avatarUrl: String? = null,
     val feedData: FeedData = FeedData(),
-)
+    val selectedChip: HomeChip? = null,
+    val isChipLoading: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val pagedShelves: List<HomeShelf> = emptyList(),
+    val chipShelves: List<HomeShelf> = emptyList(),
+    val chipContinuationToken: String? = null,
+    val defaultContinuationToken: String? = null,
+) {
+    /** True when a mood/activity chip is active; synthetic sections are hidden in this mode. */
+    val isChipActive: Boolean get() = selectedChip != null
+    val homeChips: List<HomeChip> get() = feedData.homeChips
+}
 
 @HiltViewModel
 class FeedViewModel @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: android.content.Context,
     private val repository: FeedRepository,
     private val sessionPreferences: SessionPreferences,
     private val settingsPreferences: SettingsPreferences,
     private val musicPlayer: MusicPlayer,
     private val innerTube: InnerTubeMusicApi,
+    private val relatedGraph: RelatedGraphRepository,
     private val ytAuth: YtMusicAuthManager,
     private val homeRepository: com.lastwave.app.data.repository.HomeRepository,
     private val discoverRepository: com.lastwave.app.data.discover.DiscoverRepository,
@@ -69,19 +87,39 @@ class FeedViewModel @Inject constructor(
         .map { it.hiddenHomeSections }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /** Podcast surfaces are hidden the moment the user turns them off. */
+    val podcastsEnabled: StateFlow<Boolean> = settingsPreferences.settings
+        .map { it.podcastsEnabled }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
     private var feedJob: Job? = null
+    private var chipJob: Job? = null
+    private var loadMoreJob: Job? = null
+    private var requestGeneration: Long = 0L
     private var lastLoadedMillis: Long = 0L
 
     init {
         loadDiscovery()
+        viewModelScope.launch {
+            // The podcast shelf is part of the feed, so flipping the setting
+            // has to re-run the feed: the cached copy still holds the shelf.
+            settingsPreferences.settings
+                .map { it.podcastsEnabled }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect { loadFeed() }
+        }
         viewModelScope.launch {
             ytAuth.awaitLoadedConnection()
             combine(ytAuth.connection, sessionPreferences.session) { connection, session ->
                 connection to session.username
             }.distinctUntilChanged().collect { (connection, _) ->
                 feedJob?.cancel()
+                val cached = repository.getCachedFeed()
                 _uiState.value = FeedUiState(
-                    feedData = FeedData(
+                    isLoading = cached == null,
+                    feedData = cached ?: FeedData(
                         isYtConnected = connection.isConnected,
                         ytAccountName = connection.accountName.takeIf { connection.isConnected },
                     ),
@@ -140,8 +178,25 @@ class FeedViewModel @Inject constructor(
 
     private fun fetchFeed(refreshing: Boolean) {
         feedJob?.cancel()
+        chipJob?.cancel()
+        loadMoreJob?.cancel()
+        requestGeneration++
         feedJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = !refreshing || it.isLoading, isRefreshing = refreshing, error = null) }
+            val self = coroutineContext[Job]
+            _uiState.update {
+                it.copy(
+                    isLoading = !refreshing || it.isLoading,
+                    isRefreshing = refreshing,
+                    error = null,
+                    selectedChip = if (refreshing) null else it.selectedChip,
+                    isChipLoading = if (refreshing) false else it.isChipLoading,
+                    isLoadingMore = if (refreshing) false else it.isLoadingMore,
+                    pagedShelves = if (refreshing) emptyList() else it.pagedShelves,
+                    chipShelves = if (refreshing) emptyList() else it.chipShelves,
+                    chipContinuationToken = if (refreshing) null else it.chipContinuationToken,
+                    defaultContinuationToken = if (refreshing) null else it.defaultContinuationToken,
+                )
+            }
             try {
                 val connection = ytAuth.awaitLoadedConnection()
                 val username = sessionPreferences.session.value.username.takeIf(String::isNotBlank)
@@ -150,7 +205,13 @@ class FeedViewModel @Inject constructor(
                     if (ytAuth.connection.value == connection &&
                         sessionPreferences.session.value.username.takeIf(String::isNotBlank) == username
                     ) {
-                        _uiState.update { it.copy(feedData = update, isLoading = false) }
+                        _uiState.update {
+                            it.copy(
+                                feedData = update,
+                                defaultContinuationToken = update.homeContinuationToken ?: it.defaultContinuationToken,
+                                isLoading = false,
+                            )
+                        }
                     }
                 }
                 ensureActive()
@@ -163,6 +224,7 @@ class FeedViewModel @Inject constructor(
                         isLoading = false,
                         isRefreshing = false,
                         feedData = data,
+                        defaultContinuationToken = data.homeContinuationToken,
                         error = null,
                         avatarUrl = stats?.avatarUrl ?: it.avatarUrl,
                     )
@@ -173,13 +235,167 @@ class FeedViewModel @Inject constructor(
             } catch (_: Exception) {
                 ensureActive()
                 _uiState.update {
-                    it.copy(isLoading = false, isRefreshing = false, error = "Couldn't update your feed. Please try again.")
+                    it.copy(isLoading = false, isRefreshing = false, error = appContext.getString(com.lastwave.app.R.string.feed_update_error))
+                }
+            } finally {
+                // Every exit above the success path — cancellation mid-load
+                // and the changed-identity guard — used to leave isRefreshing
+                // true, and with it a pull-to-refresh spinner that spins over
+                // fully-loaded content. Only the job that still owns the state
+                // may clear it, so a newer feed job's flags are never reset.
+                if (feedJob === self) {
+                    _uiState.update { it.copy(isRefreshing = false) }
                 }
             }
         }
     }
 
     fun dismissError() = _uiState.update { it.copy(error = null) }
+
+    /**
+     * Toggles the selected mood/activity [chip].
+     * Tapping the already selected chip returns to the default view.
+     * Selecting a new chip cancels any in-flight requests, hides synthetic sections,
+     * and displays only the chip's YTM carousel shelves.
+     */
+    fun onHomeChipSelected(chip: HomeChip) = selectChip(chip)
+
+    fun selectChip(chip: HomeChip?) {
+        val currentSelected = _uiState.value.selectedChip
+        if (chip == null || chip == currentSelected) {
+            chipJob?.cancel()
+            _uiState.update {
+                it.copy(
+                    selectedChip = null,
+                    isChipLoading = false,
+                    chipShelves = emptyList(),
+                    chipContinuationToken = null,
+                )
+            }
+            return
+        }
+
+        chipJob?.cancel()
+        loadMoreJob?.cancel()
+        val currentGen = ++requestGeneration
+        _uiState.update {
+            it.copy(
+                selectedChip = chip,
+                isChipLoading = true,
+                chipShelves = emptyList(),
+                chipContinuationToken = null,
+                error = null,
+            )
+        }
+
+        chipJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val page = innerTube.fetchHomeChip(chip)
+                ensureActive()
+                if (requestGeneration != currentGen || _uiState.value.selectedChip != chip) return@launch
+                _uiState.update {
+                    it.copy(
+                        isChipLoading = false,
+                        chipShelves = page.shelves,
+                        chipContinuationToken = page.continuationToken,
+                    )
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                ensureActive()
+                if (requestGeneration == currentGen) {
+                    _uiState.update {
+                        it.copy(
+                            selectedChip = null,
+                            isChipLoading = false,
+                            error = appContext.getString(com.lastwave.app.R.string.feed_update_error),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads the next page of shelves when scrolling near the end of Home.
+     * Enforces in-flight guard (one request at a time), stale response guard
+     * (ignores completed loads if chip or feed changed), and dedupe guard
+     * (never appends a shelf with matching title + first item id).
+     */
+    fun loadMoreHomeShelves() {
+        val state = _uiState.value
+        if (state.isLoadingMore || state.isChipLoading || state.isLoading || state.isRefreshing) return
+
+        val isChipActive = state.selectedChip != null
+        val token = if (isChipActive) {
+            state.chipContinuationToken
+        } else {
+            state.defaultContinuationToken ?: state.feedData.homeContinuationToken
+        }
+        if (token.isNullOrBlank()) return
+
+        val currentGen = requestGeneration
+        val activeChip = state.selectedChip
+        _uiState.update { it.copy(isLoadingMore = true) }
+
+        loadMoreJob?.cancel()
+        loadMoreJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val nextPage = innerTube.fetchHomeContinuation(token)
+                ensureActive()
+                if (requestGeneration != currentGen || _uiState.value.selectedChip != activeChip) return@launch
+
+                val existingShelves = if (isChipActive) {
+                    _uiState.value.chipShelves
+                } else {
+                    _uiState.value.feedData.nativeShelves + _uiState.value.pagedShelves
+                }
+                val existingKeys = existingShelves.map(::shelfFingerprint).toSet()
+
+                val newShelves = nextPage.shelves.filter { shelf ->
+                    shelf.items.isNotEmpty() && shelfFingerprint(shelf) !in existingKeys
+                }
+
+                _uiState.update { current ->
+                    if (isChipActive) {
+                        current.copy(
+                            isLoadingMore = false,
+                            chipShelves = current.chipShelves + newShelves,
+                            chipContinuationToken = nextPage.continuationToken,
+                        )
+                    } else {
+                        current.copy(
+                            isLoadingMore = false,
+                            pagedShelves = current.pagedShelves + newShelves,
+                            defaultContinuationToken = nextPage.continuationToken,
+                        )
+                    }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                ensureActive()
+                if (requestGeneration == currentGen) {
+                    _uiState.update {
+                        it.copy(
+                            isLoadingMore = false,
+                            error = appContext.getString(com.lastwave.app.R.string.feed_update_error),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun shelfFingerprint(shelf: HomeShelf): String {
+        val firstId = when (val item = shelf.items.firstOrNull()) {
+            is HomeShelfItem.Track -> item.track.videoId
+            is HomeShelfItem.Playlist -> item.playlist.id
+            null -> ""
+        }
+        return "${shelf.title.trim().lowercase()}_$firstId"
+    }
 
     fun playTrack(track: YouTubeMusicTrack, sourceLabel: String = "Feed") {
         musicPlayer.play(track.toPlayableTrack(), sourceLabel = sourceLabel, startRadio = true)
@@ -192,13 +408,19 @@ class FeedViewModel @Inject constructor(
             shuffled.map { it.toPlayableTrack() },
             startIndex = 0,
             sourceLabel = "$sourceLabel Shuffle",
+            enableRadioContinuation = true,
         )
     }
 
     fun playTracksQueue(tracks: List<YouTubeMusicTrack>, startIndex: Int = 0, sourceLabel: String = "Feed") {
         if (tracks.isEmpty()) return
         val playable = tracks.map { it.toPlayableTrack() }
-        musicPlayer.playQueue(playable, startIndex = startIndex.coerceIn(0, playable.lastIndex.coerceAtLeast(0)), sourceLabel = sourceLabel)
+        musicPlayer.playQueue(
+            playable,
+            startIndex = startIndex.coerceIn(0, playable.lastIndex.coerceAtLeast(0)),
+            sourceLabel = sourceLabel,
+            enableRadioContinuation = true,
+        )
     }
 
     fun playRecentQueue(tracks: List<RecentTrack>, startIndex: Int = 0) {
@@ -212,7 +434,12 @@ class FeedViewModel @Inject constructor(
                 videoId = GeneratedTrack(it.name, it.artist.displayName, it.artworkUrl, it.url).youtubeVideoIdOrNull(),
             )
         }
-        musicPlayer.playQueue(playable, startIndex = startIndex.coerceIn(0, playable.lastIndex.coerceAtLeast(0)), sourceLabel = "Jump Back In")
+        musicPlayer.playQueue(
+            playable,
+            startIndex = startIndex.coerceIn(0, playable.lastIndex.coerceAtLeast(0)),
+            sourceLabel = "Jump Back In",
+            enableRadioContinuation = true,
+        )
     }
 
     fun playGeneratedQueue(tracks: List<GeneratedTrack>, startIndex: Int = 0, sourceLabel: String = "Heavy Rotation") {
@@ -226,7 +453,12 @@ class FeedViewModel @Inject constructor(
                 videoId = it.youtubeVideoIdOrNull(),
             )
         }
-        musicPlayer.playQueue(playable, startIndex = startIndex.coerceIn(0, playable.lastIndex.coerceAtLeast(0)), sourceLabel = sourceLabel)
+        musicPlayer.playQueue(
+            playable,
+            startIndex = startIndex.coerceIn(0, playable.lastIndex.coerceAtLeast(0)),
+            sourceLabel = sourceLabel,
+            enableRadioContinuation = true,
+        )
     }
 
     fun playArtistRadio(artist: FeedArtist) {
@@ -243,7 +475,7 @@ class FeedViewModel @Inject constructor(
             } ?: seeds.firstOrNull()
             val related = seed?.let {
                 try {
-                    innerTube.fetchRelatedSongs(it.videoId, limit = 25, prefetchStreams = false)
+                    relatedGraph.relatedFor(it.videoId, limit = 25, prefetchStreams = false)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (_: Exception) {
@@ -272,7 +504,7 @@ class FeedViewModel @Inject constructor(
                 val seed = seeds.take(5).randomOrNull()
                 val related = seed?.let {
                     try {
-                        innerTube.fetchRelatedSongs(it.videoId, limit = 24, prefetchStreams = false)
+                        relatedGraph.relatedFor(it.videoId, limit = 24, prefetchStreams = false)
                     } catch (cancellation: CancellationException) {
                         throw cancellation
                     } catch (_: Exception) {
@@ -307,6 +539,33 @@ class FeedViewModel @Inject constructor(
             if (tracks.isNotEmpty()) {
                 val playable = tracks.map { it.toPlayableTrack() }
                 musicPlayer.playQueue(playable, startIndex = 0, sourceLabel = title)
+            }
+        }
+    }
+
+    fun playDiscoverMix(tile: FeedQuickTile? = null) {
+        viewModelScope.launch {
+            var playlistId = tile?.playlistId
+            if (playlistId.isNullOrBlank()) {
+                val feed = _uiState.value.feedData
+                val found = feed.ytSuggestedPlaylists.firstOrNull { it.title.contains("Discover Mix", ignoreCase = true) }
+                    ?: feed.nativeShelves.flatMap { it.items }.filterIsInstance<com.lastwave.app.data.music.HomeShelfItem.Playlist>()
+                        .map { it.playlist }.firstOrNull { it.title.contains("Discover Mix", ignoreCase = true) }
+                playlistId = found?.id
+            }
+            if (playlistId.isNullOrBlank()) {
+                val mixes = runCatching { innerTube.fetchHomeMixes() }.getOrDefault(emptyList())
+                playlistId = mixes.firstOrNull { it.title.contains("Discover Mix", ignoreCase = true) }?.id
+            }
+            if (playlistId.isNullOrBlank()) {
+                val search = runCatching { innerTube.searchPlaylists("Discover Mix") }.getOrDefault(emptyList())
+                playlistId = search.firstOrNull { it.title.contains("Discover Mix", ignoreCase = true) }?.id
+                    ?: search.firstOrNull()?.id
+            }
+            if (!playlistId.isNullOrBlank()) {
+                playPlaylistById(playlistId, "Discover Mix")
+            } else {
+                playInfiniteRadio()
             }
         }
     }

@@ -5,6 +5,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BubbleChart
@@ -15,6 +16,7 @@ import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FormatListBulleted
@@ -25,18 +27,22 @@ import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material3.MaterialTheme
@@ -182,6 +188,23 @@ object SettingsSearchIndex {
             )
             add(
                 SettingsEntry(
+                    id = "audio.keep_lyrics_screen_awake",
+                    title = "Keep Screen Awake on Lyrics",
+                    subtitle = "Prevent screen from turning off while viewing lyrics",
+                    keywords = listOf(
+                        "keep screen awake", "keep screen on", "lyrics sleep", "screen timeout",
+                        "display awake", "lyrics screen"
+                    ),
+                    icon = Icons.Filled.Lyrics,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.AUDIO,
+                    section = "Audio & Playback",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
                     id = "audio.download_lyrics",
                     title = "Download Lyrics",
                     subtitle = "Save .lrc companion files & embed lyrics in downloaded tracks",
@@ -276,6 +299,23 @@ object SettingsSearchIndex {
                     icon = Icons.Filled.VolumeUp,
                     iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
                     iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.AUDIO,
+                    section = "Output & Loudness",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "audio.autoeq",
+                    title = "AutoEQ",
+                    subtitle = "Headphone correction from the AutoEQ database, parametric EQ, per-device profiles",
+                    keywords = listOf(
+                        "autoeq", "auto eq", "headphone", "casque", "iem", "harman", "parametric",
+                        "peq", "correction", "oratory1990", "crinacle", "target",
+                    ),
+                    icon = Icons.Filled.GraphicEq,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
                     parentTab = SettingsTab.AUDIO,
                     section = "Output & Loudness",
                     type = EntryType.ACTION,
@@ -389,6 +429,23 @@ object SettingsSearchIndex {
             )
             add(
                 SettingsEntry(
+                    id = "appearance.lastwave_theme",
+                    title = "LastWave Signature Theme",
+                    subtitle = "Bespoke logo palette with Electric Lime and Obsidian Teal",
+                    keywords = listOf(
+                        "lastwave theme", "brand theme", "special theme", "logo theme", "lime",
+                        "teal", "obsidian", "electric lime", "iconic theme", "brand colors"
+                    ),
+                    icon = Icons.Filled.AutoAwesome,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Appearance",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
                     id = "appearance.amoled",
                     title = "Pure Black AMOLED",
                     subtitle = "Pitch black surfaces for OLED and AMOLED screens to save battery",
@@ -433,6 +490,23 @@ object SettingsSearchIndex {
                     icon = Icons.Filled.BubbleChart,
                     iconContainer = { MaterialTheme.colorScheme.primaryContainer },
                     iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Appearance",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "appearance.md3_nav_bar",
+                    title = "Material 3 Navigation Bar",
+                    subtitle = "Classic full-width bottom navigation bar instead of the floating dock",
+                    keywords = listOf(
+                        "md3", "material 3", "navigation bar", "bottom bar", "nav bar",
+                        "dock", "floating dock", "full width nav"
+                    ),
+                    icon = Icons.Filled.Apps,
+                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
                     parentTab = SettingsTab.APPEARANCE,
                     section = "Appearance",
                     type = EntryType.TOGGLE,
@@ -542,6 +616,23 @@ object SettingsSearchIndex {
             )
             add(
                 SettingsEntry(
+                    id = "appearance.music_video",
+                    title = "Music Video",
+                    subtitle = "Watch exact-sync music video of currently playing song in player menu",
+                    keywords = listOf(
+                        "video", "music video", "watch video", "mv", "synced video", "youtube video",
+                        "fullscreen video", "exact ms sync", "now playing video"
+                    ),
+                    icon = Icons.Filled.SmartDisplay,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Experimental & Features",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
                     id = "appearance.rotating_background",
                     title = "Rotating Background",
                     subtitle = "Animate fluid rotating artwork in player and lyrics view (disable for static background)",
@@ -549,6 +640,23 @@ object SettingsSearchIndex {
                         "rotating background", "rotating artwork", "fluid background", "static background",
                         "disable rotation", "android 11", "spinning artwork", "player background",
                         "lyrics background", "album rotation", "static artwork"
+                    ),
+                    icon = Icons.Filled.RestartAlt,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Experimental & Features",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "appearance.lyrics_rotating_background",
+                    title = "Lyrics Background Motion",
+                    subtitle = "Animate fluid rotating artwork in lyrics view (disable for static background)",
+                    keywords = listOf(
+                        "lyrics background motion", "lyrics rotating background", "lyrics fluid background",
+                        "lyrics motion", "lyrics background"
                     ),
                     icon = Icons.Filled.RestartAlt,
                     iconContainer = { MaterialTheme.colorScheme.primaryContainer },
@@ -602,6 +710,40 @@ object SettingsSearchIndex {
                         "bigger lyrics", "smaller lyrics", "lyrics scale", "lyrics zoom"
                     ),
                     icon = Icons.Filled.FormatSize,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Experimental & Features",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "appearance.lyrics_autohide",
+                    title = "Hide Lyrics Buttons",
+                    subtitle = "Idle time before the floating lyrics buttons fade out (2-10 s or Never)",
+                    keywords = listOf(
+                        "hide lyrics buttons", "auto hide", "idle", "fade out", "lyrics controls",
+                        "font size button", "fullscreen button", "never", "seconds", "timeout"
+                    ),
+                    icon = Icons.Filled.VisibilityOff,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.APPEARANCE,
+                    section = "Experimental & Features",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "appearance.translation_language",
+                    title = "Translation Language",
+                    subtitle = "Language the lyrics translate button turns songs into (blank follows the app language)",
+                    keywords = listOf(
+                        "translation language", "translate lyrics", "lyrics language", "romanization",
+                        "romanize", "language of lyrics", "translate to", "lyrics translate"
+                    ),
+                    icon = Icons.Filled.Translate,
                     iconContainer = { MaterialTheme.colorScheme.primaryContainer },
                     iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
                     parentTab = SettingsTab.APPEARANCE,
@@ -783,6 +925,120 @@ object SettingsSearchIndex {
                     type = EntryType.TOGGLE,
                 )
             )
+            add(
+                SettingsEntry(
+                    id = "spotify.account",
+                    title = "Connect Spotify Account",
+                    subtitle = "Sign in to enable official Spotify Canvas video loops & library sync",
+                    keywords = listOf(
+                        "spotify", "spotify account", "connect spotify", "sp_dc", "spotify login",
+                        "canvas login", "disconnect spotify", "logout spotify", "sign out"
+                    ),
+                    icon = Icons.Filled.PlayCircle,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.primary },
+                    parentTab = SettingsTab.SPOTIFY,
+                    section = "Spotify",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "spotify.import",
+                    title = "Your Spotify Playlists",
+                    subtitle = "Import your Spotify playlists and Liked Songs into this app's library",
+                    keywords = listOf(
+                        "spotify playlist", "import playlist", "my playlists", "liked songs",
+                        "spotify library", "import from spotify"
+                    ),
+                    icon = Icons.Filled.QueueMusic,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.SPOTIFY,
+                    section = "Spotify",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "spotify.canvas",
+                    title = "Spotify Canvas (Looping background videos)",
+                    subtitle = "Fetch and play Spotify's looping visual videos in background",
+                    keywords = listOf(
+                        "spotify canvas", "canvas", "video loop", "looping video", "moving background"
+                    ),
+                    icon = Icons.Filled.SmartDisplay,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.SPOTIFY,
+                    section = "Spotify",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "spotify.prefer_canvas",
+                    title = "Prefer Spotify Canvas",
+                    subtitle = "Ask Spotify first, before Apple Music, Tidal and community artwork",
+                    keywords = listOf(
+                        "spotify canvas", "prefer", "priority", "first", "apple music", "tidal"
+                    ),
+                    icon = Icons.Filled.AutoAwesome,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.SPOTIFY,
+                    section = "Spotify",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "spotify.token",
+                    title = "Import sp_dc token",
+                    subtitle = "Paste a session cookie from your browser instead of signing in here",
+                    keywords = listOf(
+                        "sp_dc", "cookie", "token", "paste", "import", "session", "spotify login"
+                    ),
+                    icon = Icons.Filled.Key,
+                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
+                    parentTab = SettingsTab.SPOTIFY,
+                    section = "Session Token",
+                    type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "liked.local",
+                    title = "Save to Liked Songs",
+                    subtitle = "Keep a Liked Songs list in this app",
+                    keywords = listOf(
+                        "liked songs", "like", "heart", "favorite", "favourites", "local playlist"
+                    ),
+                    icon = Icons.Filled.Favorite,
+                    iconContainer = { MaterialTheme.colorScheme.primaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onPrimaryContainer },
+                    parentTab = SettingsTab.YOUTUBE,
+                    section = "Liked Songs",
+                    type = EntryType.TOGGLE,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "liked.youtube",
+                    title = "Sync Liked Songs to YouTube Music",
+                    subtitle = "Also mark liked songs as liked on YouTube Music",
+                    keywords = listOf(
+                        "liked songs", "sync", "youtube music", "like", "heart", "favorite"
+                    ),
+                    icon = Icons.Filled.CloudSync,
+                    iconContainer = { MaterialTheme.colorScheme.secondaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onSecondaryContainer },
+                    parentTab = SettingsTab.YOUTUBE,
+                    section = "Liked Songs",
+                    type = EntryType.TOGGLE,
+                )
+            )
 
             // ==========================================
             // TAB: LAST.FM
@@ -879,6 +1135,23 @@ object SettingsSearchIndex {
                     parentTab = SettingsTab.LIBRARY,
                     section = "Home & Organization",
                     type = EntryType.ACTION,
+                )
+            )
+            add(
+                SettingsEntry(
+                    id = "library.podcasts",
+                    title = "Podcasts",
+                    subtitle = "Show or hide podcast shelves, show pages and episode search",
+                    keywords = listOf(
+                        "podcast", "podcasts", "shows", "episodes", "hide podcasts",
+                        "youtube music podcasts", "episode search"
+                    ),
+                    icon = Icons.Filled.Mic,
+                    iconContainer = { MaterialTheme.colorScheme.tertiaryContainer },
+                    iconTint = { MaterialTheme.colorScheme.onTertiaryContainer },
+                    parentTab = SettingsTab.LIBRARY,
+                    section = "Content",
+                    type = EntryType.TOGGLE,
                 )
             )
             add(

@@ -111,6 +111,15 @@ class NativeProcessingAudioSink(
     /** Channel count the shared converter emits while it serves internal direct. */
     private var converterChannels = 2
 
+    /**
+     * AutoEQ on routes where PCM never enters the native Float32 DSP (USB
+     * exclusive, internal direct, Bit-Perfect AudioTrack, platform fallback).
+     * The converter / processed paths get the same EQ inside the native DSP.
+     */
+    private val directEq = com.lastwave.app.playback.eq.DirectPcmEq()
+    /** Buffer already equalised: Media3 retries the same object until consumed. */
+    private var directEqBuffer: ByteBuffer? = null
+
     var onConfiguredFormat: ((sampleRateHz: Int, pcmEncoding: Int, channelCount: Int) -> Unit)? = null
     var bitDepthHintProvider: (() -> Int?)? = null
 
@@ -176,6 +185,10 @@ class NativeProcessingAudioSink(
 
         if (format.sampleRate > 0) {
             onConfiguredFormat?.invoke(format.sampleRate, format.pcmEncoding, format.channelCount)
+        }
+        directEqBuffer = null
+        if (format.sampleMimeType == MimeTypes.AUDIO_RAW && format.sampleRate > 0) {
+            directEq.configure(format.sampleRate, format.channelCount, format.pcmEncoding)
         }
 
         if (exclusiveWanted && internalDirect?.hasOpenStream() == true) {
@@ -461,6 +474,29 @@ class NativeProcessingAudioSink(
     ): Boolean {
         maybeAdoptExclusiveUsb()
         maybeAdoptInternalDirect()
+        if (directEqBuffer !== buffer && isDirectEqRoute()) {
+            directEq.process(buffer)
+            directEqBuffer = buffer
+        }
+        val consumed = handleRoutedBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+        // Decoder buffers are recycled objects: once consumed, the next
+        // payload in the same object must be equalised again.
+        if (consumed) directEqBuffer = null
+        return consumed
+    }
+
+    /** True when this buffer bypasses the native DSP (where the EQ otherwise runs). */
+    private fun isDirectEqRoute(): Boolean = when {
+        usbExclusive -> !isExclusiveConverting()
+        internalActive -> internalDirect?.requiresResampling() != true
+        else -> !processingActive
+    }
+
+    private fun handleRoutedBuffer(
+        buffer: ByteBuffer,
+        presentationTimeUs: Long,
+        encodedAccessUnitCount: Int,
+    ): Boolean {
         if (usbExclusive) {
             if (exclusiveUsb?.isPaused() == true) {
                 return false
@@ -469,17 +505,7 @@ class NativeProcessingAudioSink(
                 return handleExclusiveConvertedBuffer(buffer, presentationTimeUs)
             }
             val fmt = configuredFormat
-            val gain = exclusiveUsb?.softwareGain() ?: lastVolume
-            val needsGain = gain < 1f - 1e-6f && gain >= 0f && buffer.hasRemaining() &&
-                fmt?.sampleMimeType == MimeTypes.AUDIO_RAW
-            if (needsGain && fmt != null) {
-                if (lastGainBuffer !== buffer) {
-                    scalePcmInPlace(buffer, buffer.position(), buffer.limit(), fmt.pcmEncoding, gain)
-                    lastGainBuffer = buffer
-                }
-            } else {
-                lastGainBuffer = null
-            }
+            lastGainBuffer = null
             val ok = exclusiveUsb?.write(
                 buffer,
                 presentationTimeUs,
@@ -570,7 +596,6 @@ class NativeProcessingAudioSink(
         return activeDelegate.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
     }
 
-    /** Linear gain on interleaved PCM, in place, with proper rounding/clipping. */
     private fun scalePcmInPlace(
         buffer: ByteBuffer,
         startPos: Int,
@@ -578,6 +603,7 @@ class NativeProcessingAudioSink(
         media3Encoding: Int,
         gain: Float,
     ) {
+        if (buffer.isReadOnly) return
         val originalOrder = buffer.order()
         try {
             buffer.order(ByteOrder.LITTLE_ENDIAN)
@@ -1278,20 +1304,14 @@ class NativeProcessingAudioSink(
             // owns the worst case — never feed unconverted bytes.
             if (!setupExclusiveConverter(source, target)) return false
         }
-        // Volume parity with the raw exclusive path (keys must work here
-        // too); unity otherwise. Scaled once per fresh chunk — stashed
-        // chunks are never re-scaled on retry.
-        val session = exclusiveUsb
-        val gain = session?.softwareGain() ?: lastVolume
+        // The exclusive USB writer owns software gain for both raw and
+        // resampled PCM. Applying it here too attenuates fallback PCM twice.
         processor.queueInput(buffer.duplicate())
         buffer.position(buffer.limit())
         var guard = 0
         while (guard++ < 32) {
             val out = processor.getOutput()
             if (out === AudioProcessor.EMPTY_BUFFER || !out.hasRemaining()) break
-            if (gain < 1f - 1e-6f && gain >= 0f) {
-                scalePcmInPlace(out, out.position(), out.limit(), C.ENCODING_PCM_FLOAT, gain)
-            }
             if (!writeConvertedToUsb(out, presentationTimeUs)) {
                 pendingUsbFloat = out
                 pendingUsbPtsUs = presentationTimeUs
@@ -1453,6 +1473,8 @@ class NativeProcessingAudioSink(
     }
 
     override fun flush() {
+        directEq.reset()
+        directEqBuffer = null
         clearPending()
         clearEndOfStream()
         exclusiveEnded = false
@@ -1491,6 +1513,8 @@ class NativeProcessingAudioSink(
     }
 
     override fun reset() {
+        directEq.reset()
+        directEqBuffer = null
         usbOutput?.setFormat(null)
         if (usbExclusive && exclusiveWanted) {
             exclusiveUsb?.prepareForNextItem()

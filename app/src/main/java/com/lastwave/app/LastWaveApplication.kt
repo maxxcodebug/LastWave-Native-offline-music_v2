@@ -59,6 +59,9 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
         runCatching { com.lastwave.app.playback.PlaybackDiagnostics.install(this) }
         runCatching { com.lastwave.app.data.music.potoken.BotGuardTokenGenerator.initialize(this) }
         runCatching { com.lastwave.app.data.canvas.CanvasCache.init(this) }
+        // On-demand lyric translation/romanization keeps its bounded result
+        // cache under the app cache directory so Android may reclaim it.
+        runCatching { com.lastwave.app.data.lyrics.LyricsTranslation.cacheDir = cacheDir }
         // First-song OPUS warmup: visitorData + NewPipe + BotGuard must be
         // ready before the first tap, not 2.5s after. Immediate and never
         // throws; the delayed block below keeps the rest lazy.
@@ -116,6 +119,7 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
         // asynchronously on startup so offline playback works immediately.
         applicationScope.launch(Dispatchers.IO) {
             delay(OPTIONAL_STARTUP_DELAY_MS)
+            runCatching { trackDownloadManager.get().restoreDownloadsAfterReinstall() }
             runCatching { trackDownloadManager.get().syncDownloadsFromStorage() }
                 .onFailure { com.lastwave.app.diagnostics.AppLog.e("LastWaveStartup", "Download sync startup failed", it) }
         }

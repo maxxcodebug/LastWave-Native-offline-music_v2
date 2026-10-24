@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,6 +35,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,6 +49,7 @@ import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.MoreVert
@@ -57,6 +60,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.Button
@@ -78,6 +82,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,8 +97,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
+import com.lastwave.app.R
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -114,6 +122,9 @@ import com.lastwave.app.data.model.FriendEntry
 import com.lastwave.app.data.model.RecentTrack
 import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.music.YouTubePlaylistSummary
+import com.lastwave.app.data.music.HomeChip
+import com.lastwave.app.data.music.HomeShelf
+import com.lastwave.app.data.music.HomeShelfItem
 import com.lastwave.app.playback.PlayableTrack
 import com.lastwave.app.ui.common.ArtworkImage
 import com.lastwave.app.ui.common.ExpressiveHeader
@@ -125,13 +136,14 @@ import com.lastwave.app.ui.common.WindowSizeClass
 import com.lastwave.app.ui.common.rememberWindowSizeClass
 import com.lastwave.app.ui.common.TrackMenuCapabilities
 import com.lastwave.app.ui.common.TrackMenuTarget
-import com.lastwave.app.ui.common.ExpressiveLoadingIndicator
+import com.lastwave.app.ui.common.ExpressiveInlineLoadingIndicator
 import com.lastwave.app.ui.common.adaptiveContentWidth
 import com.lastwave.app.ui.common.safeHorizontalContentPadding
 import com.lastwave.app.ui.navigation.ArtistAlbumNavigator
 import com.lastwave.app.ui.player.LocalMusicPlayer
 import com.lastwave.app.ui.player.PlayingWaveBars
 import com.lastwave.app.ui.shell.FloatingNavDefaults
+import com.lastwave.app.ui.podcast.PodcastShowRow
 
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -147,6 +159,8 @@ fun FeedScreen(
     onOpenDownloads: () -> Unit = {},
     onOpenFriendProfile: (username: String, displayName: String?, avatarUrl: String?) -> Unit = { _, _, _ -> },
     onOpenNewReleases: () -> Unit = {},
+    onOpenPodcasts: () -> Unit = {},
+    onOpenPodcastShow: (String) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
     artistAlbumNavigator: ArtistAlbumNavigator = hiltViewModel<ArtistAlbumNavBridgeFeed>().navigator,
 ) {
@@ -161,27 +175,45 @@ fun FeedScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val musicPlayer = LocalMusicPlayer.current
+    val context = LocalContext.current
     val playbackState by musicPlayer.chromeState.collectAsStateWithLifecycle()
     var menuTrack by remember { mutableStateOf<YouTubeMusicTrack?>(null) }
     // Long-press (deep press) mini tray — 3-dot buttons keep the full sheet.
     var miniTrayTrack by remember { mutableStateOf<TrackMiniTrayData?>(null) }
     // Sections hidden via Settings → Home sections.
     val hiddenSections by viewModel.hiddenHomeSections.collectAsStateWithLifecycle()
+    val podcastsEnabled by viewModel.podcastsEnabled.collectAsStateWithLifecycle()
     fun isSectionVisible(section: HomeSection) = section.id !in hiddenSections
     val snackbarHostState = remember { SnackbarHostState() }
-    val hasFeedContent = with(state.feedData) {
-        quickTiles.isNotEmpty() || mixes.isNotEmpty() || topArtists.isNotEmpty() ||
+    val hasFeedContent = state.isChipActive || with(state.feedData) {
+        nativeShelves.any { it.items.isNotEmpty() } ||
+            quickTiles.isNotEmpty() || mixes.isNotEmpty() || topArtists.isNotEmpty() ||
             quickPicks.isNotEmpty() || jumpBackIn.isNotEmpty() || recentAlbums.isNotEmpty() ||
             heavyRotation.isNotEmpty() || ytLikedSongs.isNotEmpty() || ytRecentSongs.isNotEmpty() ||
             (becauseYouListenTo?.items?.isNotEmpty() == true) || freshFinds.isNotEmpty() ||
-            spotlight != null || charts.isNotEmpty() || newReleases.isNotEmpty() || friends.isNotEmpty()
+            spotlight != null || charts.isNotEmpty() || newReleases.isNotEmpty() || friends.isNotEmpty() ||
+            podcastShows.isNotEmpty()
+    }
+    val showSynthetic = !state.isChipActive
+    val listState = rememberLazyListState()
+    val shouldLoadMore by remember(listState) {
+        derivedStateOf {
+            val total = listState.layoutInfo.totalItemsCount
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 0 && last >= total - 3
+        }
+    }
+    LaunchedEffect(shouldLoadMore, state.pagedShelves.size, state.chipShelves.size) {
+        if (shouldLoadMore && !state.isLoading && !state.isLoadingMore && !state.isRefreshing && !state.isChipLoading) {
+            viewModel.loadMoreHomeShelves()
+        }
     }
     val greeting = remember {
         when (java.time.LocalTime.now().hour) {
-            in 5..11 -> "Good morning"
-            in 12..16 -> "Good afternoon"
-            in 17..21 -> "Good evening"
-            else -> "Good night"
+            in 5..11 -> context.getString(R.string.feed_greeting_morning)
+            in 12..16 -> context.getString(R.string.feed_greeting_afternoon)
+            in 17..21 -> context.getString(R.string.feed_greeting_evening)
+            else -> context.getString(R.string.feed_greeting_night)
         }
     }
     val formattedDate = remember {
@@ -192,7 +224,7 @@ fun FeedScreen(
     LaunchedEffect(state.error, hasFeedContent) {
         val error = state.error ?: return@LaunchedEffect
         if (hasFeedContent) {
-            val result = snackbarHostState.showSnackbar(error, actionLabel = "Retry", withDismissAction = true)
+            val result = snackbarHostState.showSnackbar(error, actionLabel = context.getString(R.string.feed_retry), withDismissAction = true)
             viewModel.dismissError()
             if (result == SnackbarResult.ActionPerformed) viewModel.refresh()
         }
@@ -208,7 +240,7 @@ fun FeedScreen(
                 .adaptiveContentWidth(maxWidth = 920.dp),
         ) {
             ExpressiveHeader(
-                title = "Home",
+                title = stringResource(R.string.feed_home),
                 actions = {
                     HeaderActionIcon(Icons.Filled.Download, "Downloads", onOpenDownloads)
                     HeaderActionIcon(Icons.Filled.Search, "Search", onOpenSearch)
@@ -217,6 +249,17 @@ fun FeedScreen(
                     }
                 },
             )
+
+            // Pinned YTM chip row under the app bar — stays visible while the
+            // feed scrolls beneath it. Rendered only when chips exist; its
+            // loading/filtering/selection behaviour is unchanged.
+            if (state.homeChips.isNotEmpty()) {
+                PinnedChipsBar(
+                    chips = state.homeChips,
+                    selectedChip = state.selectedChip,
+                    onChipClick = viewModel::onHomeChipSelected,
+                )
+            }
 
             PullToRefreshBox(
                 isRefreshing = state.isRefreshing,
@@ -256,6 +299,7 @@ fun FeedScreen(
                 }
 
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize().safeHorizontalContentPadding(),
                     contentPadding = PaddingValues(
                         bottom = FloatingNavDefaults.contentBottomPadding(),
@@ -263,7 +307,7 @@ fun FeedScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(24.dp),
                 ) {
-                    if (isSectionVisible(HomeSection.HERO)) {
+                    if (showSynthetic && isSectionVisible(HomeSection.HERO)) {
                     item(key = "hero") {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Column(
@@ -309,7 +353,7 @@ fun FeedScreen(
                                 it.playlistId != "yt_liked" && it.playlistId != "yt_recent"
                         }
                     }
-                    if (isSectionVisible(HomeSection.QUICK_TILES) && quickTiles.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.QUICK_TILES) && quickTiles.isNotEmpty()) {
                         item(key = "quick_tiles") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -317,20 +361,25 @@ fun FeedScreen(
                                 color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f),
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                            FeedSectionHeader(title = "Quick access")
+                            FeedSectionHeader(title = stringResource(R.string.feed_quick_access))
                                     Spacer(modifier = Modifier.height(12.dp))
                             QuickTilesGrid(
                                 tiles = quickTiles,
                                 onTileClick = { tile ->
                                     when {
-                                        tile.collection == "radio" -> onOpenDiscover()
-                                        tile.collection == "discover_mix" -> {
-                                            if (tile.playlistId != null) {
-                                                viewModel.playPlaylistById(tile.playlistId, tile.title)
-                                            } else {
-                                                onOpenDiscover()
+                                        tile.collection == "live_map" -> {
+                                            runCatching {
+                                                androidx.browser.customtabs.CustomTabsIntent.Builder().build()
+                                                    .launchUrl(context, android.net.Uri.parse("https://telemetry.clashprojects.qd.je"))
+                                            }.onFailure {
+                                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://telemetry.clashprojects.qd.je")).apply {
+                                                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
+                                                runCatching { context.startActivity(intent) }
                                             }
                                         }
+                                        tile.collection == "radio" -> onOpenDiscover()
+                                        tile.collection == "discover_mix" -> viewModel.playDiscoverMix(tile)
                                         tile.collection == "mix" -> onOpenGenerator()
                                         tile.collection == "my_mix" -> {
                                             if (tile.playlistId != null) {
@@ -354,19 +403,95 @@ fun FeedScreen(
                         }
                     }
 
-                    // 3. "Your Sound" Section - ALWAYS visible below Quick Access
-                    val displayTags = state.feedData.tasteTags.ifEmpty {
-                        listOf("Rock", "Indie", "Pop", "Electronic", "Hip-Hop", "R&B", "Synthwave", "Alternative")
-                    }
-                    item(key = "taste_strip") {
-                        TasteStrip(
-                            tags = displayTags,
-                            launching = state.launchingRadio,
-                            onTagClick = { tag -> viewModel.playDiscoveryQuery(tag.displayName(), tag) },
-                        )
+                    if (showSynthetic && podcastsEnabled && state.feedData.podcastShows.isNotEmpty()) {
+                        item(key = "podcast_shelf") {
+                            Column(Modifier.padding(vertical = 4.dp)) {
+                                FeedSectionHeader(
+                                    title = state.feedData.podcastShelfTitle
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?: stringResource(R.string.podcasts_title),
+                                    actionText = stringResource(R.string.podcasts_see_all),
+                                    actionIcon = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                                    onActionClick = onOpenPodcasts,
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                PodcastShowRow(
+                                    shows = state.feedData.podcastShows,
+                                    onShowClick = { show -> onOpenPodcastShow(show.showId) },
+                                )
+                            }
+                        }
                     }
 
-                    if (isSectionVisible(HomeSection.QUICK_PICKS) && state.feedData.quickPicks.isNotEmpty()) {
+                    // 3. "Your Sound" Section - ALWAYS visible below Quick Access
+                    if (showSynthetic) {
+                        val displayTags = state.feedData.tasteTags.ifEmpty {
+                            listOf("Rock", "Indie", "Pop", "Electronic", "Hip-Hop", "R&B", "Synthwave", "Alternative")
+                        }
+                        item(key = "taste_strip") {
+                            TasteStrip(
+                                tags = displayTags,
+                                launching = state.launchingRadio,
+                                onTagClick = { tag -> viewModel.playDiscoveryQuery(tag.displayName(), tag) },
+                            )
+                        }
+                    }
+
+                    // YouTube Music mood/activity chips (Relax, Energize, Workout,
+                    // ...) are pinned at the top under the app bar — see the
+                    // PinnedChipsBar rendered above the LazyColumn. Loading,
+                    // filtering and selection logic are unchanged; only the
+                    // row's position moved from between feed sections to the top.
+
+                    if (state.isChipActive) {
+                        if (state.isChipLoading) {
+                            // Card-shaped shimmer placeholders that mirror the
+                            // native shelf layout the chip page will render.
+                            item(key = "chip_loading_skeleton") {
+                                Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                                    com.lastwave.app.ui.feed.cards.ShelfSquareSkeletonRow(
+                                        cardWidth = com.lastwave.app.ui.feed.cards.rememberSquareCardWidth(),
+                                    )
+                                    com.lastwave.app.ui.feed.cards.ShelfWideSkeletonRow(
+                                        cardWidth = com.lastwave.app.ui.feed.cards.rememberWideCardWidth(),
+                                    )
+                                }
+                            }
+                        } else {
+                            for ((shelfIndex, shelf) in state.chipShelves.withIndex()) {
+                                if (shelf.items.isEmpty()) continue
+                                item(key = "chip_shelf_${shelfIndex}_${shelf.title}") {
+                                    HomeShelfCard(
+                                        shelf = shelf,
+                                        onPlayTrack = { track, title -> viewModel.playTrack(track, title) },
+                                        onPlayTracksQueue = { tracks, idx, title -> viewModel.playTracksQueue(tracks, idx, title) },
+                                        onShuffleTracksQueue = { tracks, title -> viewModel.shuffleTracksQueue(tracks, title) },
+                                        onOpenFeedPlaylist = onOpenFeedPlaylist,
+                                        onOpenAlbum = { title, artist, id -> artistAlbumNavigator.openAlbum(title, artist, id) },
+                                        onTrackLongClick = { tray -> miniTrayTrack = tray },
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // Native YouTube Music shelves (exact titles, original order, original items)
+                        for ((shelfIndex, shelf) in state.feedData.nativeShelves.withIndex()) {
+                            if (shelf.items.isEmpty()) continue
+                            item(key = "native_shelf_${shelfIndex}_${shelf.title}") {
+                                HomeShelfCard(
+                                    shelf = shelf,
+                                    onPlayTrack = { track, title -> viewModel.playTrack(track, title) },
+                                    onPlayTracksQueue = { tracks, idx, title -> viewModel.playTracksQueue(tracks, idx, title) },
+                                    onShuffleTracksQueue = { tracks, title -> viewModel.shuffleTracksQueue(tracks, title) },
+                                    onOpenFeedPlaylist = onOpenFeedPlaylist,
+                                    onOpenAlbum = { title, artist, id -> artistAlbumNavigator.openAlbum(title, artist, id) },
+                                    onTrackLongClick = { tray -> miniTrayTrack = tray },
+                                )
+                            }
+                        }
+                    }
+
+                    if (showSynthetic && isSectionVisible(HomeSection.QUICK_PICKS) && state.feedData.quickPicks.isNotEmpty()) {
                         item(key = "quick_picks") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -374,18 +499,18 @@ fun FeedScreen(
                                 color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f),
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                            val title = if (state.feedData.hasYtRecommendations) "Picked for you" else "Quick picks"
+                            val title = if (state.feedData.hasYtRecommendations) stringResource(R.string.feed_picked_you) else stringResource(R.string.feed_quick_picks)
                             val subtitle = if (state.feedData.hasYtRecommendations) {
-                                "From your listening - refreshed for you"
+                                stringResource(R.string.feed_from_listening)
                             } else if (state.feedData.hasPersonalContent) {
-                                "Matched to your taste profile"
+                                stringResource(R.string.feed_matched_taste)
                             } else {
-                                "Trending songs worth playing now"
+                                stringResource(R.string.feed_trending_worth)
                             }
                             FeedSectionHeader(
                                 title = title,
                                 subtitle = subtitle,
-                                actionText = "Play all",
+                                actionText = stringResource(R.string.feed_play_all),
                                 actionIcon = Icons.Filled.PlayArrow,
                                 onActionClick = { viewModel.playTracksQueue(state.feedData.quickPicks, 0, "Quick Picks") },
                                 onShuffleClick = { viewModel.shuffleTracksQueue(state.feedData.quickPicks, "Quick Picks") },
@@ -394,7 +519,14 @@ fun FeedScreen(
                                 tracks = state.feedData.quickPicks,
                                 currentPlayingVideoId = playbackState.current?.videoId,
                                 isPlaying = playbackState.isPlaying,
-                                onTrackClick = { index -> viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks") },
+                                onTrackClick = { index ->
+                                    val track = state.feedData.quickPicks.getOrNull(index)
+                                    if (track != null) {
+                                        viewModel.playTrack(track, "Quick Picks")
+                                    } else {
+                                        viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks")
+                                    }
+                                },
                                 onMenuClick = { menuTrack = it },
                                 onLongClick = { track, index ->
                                     miniTrayTrack = TrackMiniTrayData(
@@ -404,7 +536,7 @@ fun FeedScreen(
                                         artworkUrl = track.artworkUrl,
                                         videoId = track.videoId.takeIf(String::isNotBlank),
                                         sourceLabel = "Home",
-                                        onPlay = { viewModel.playTracksQueue(state.feedData.quickPicks, index, "Quick Picks") },
+                                        onPlay = { viewModel.playTrack(track, "Quick Picks") },
                                     )
                                 },
                             )
@@ -414,7 +546,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (discoveryTracks.isNotEmpty()) {
+                    if (showSynthetic && discoveryTracks.isNotEmpty()) {
                         item(key = "discover_new_music") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -423,9 +555,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                                     FeedSectionHeader(
-                                        title = "Discover New Music",
-                                        subtitle = "Handpicked tracks matched to your taste",
-                                        actionText = "See all",
+                                        title = stringResource(R.string.feed_discover),
+                                        subtitle = stringResource(R.string.feed_discover_sub),
+                                        actionText = stringResource(R.string.feed_see_all),
                                         actionIcon = Icons.AutoMirrored.Filled.ArrowForwardIos,
                                         onActionClick = onOpenDiscover,
                                     )
@@ -456,7 +588,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.BECAUSE_YOU_LISTEN_TO)) {
+                    if (showSynthetic && isSectionVisible(HomeSection.BECAUSE_YOU_LISTEN_TO)) {
                     state.feedData.becauseYouListenTo?.takeIf { it.items.isNotEmpty() }?.let { section ->
                         item(key = "because_you_listen_to") {
                             Surface(
@@ -468,7 +600,7 @@ fun FeedScreen(
                             FeedSectionHeader(
                                 title = section.title,
                                 subtitle = section.subtitle,
-                                actionText = "Play all",
+                                actionText = stringResource(R.string.feed_play_all),
                                 actionIcon = Icons.Filled.PlayArrow,
                                 onActionClick = { viewModel.playTracksQueue(section.items, 0, section.title) },
                                 onShuffleClick = { viewModel.shuffleTracksQueue(section.items, section.title) },
@@ -481,7 +613,7 @@ fun FeedScreen(
                                             subtitle = ArtistHelper.primaryArtist(track.artist),
                                             artworkUrl = track.artworkUrl,
                                             fallbackIcon = Icons.Filled.MusicNote,
-                                            onClick = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                            onClick = { viewModel.playTrack(track, section.title) },
                                             onLongClick = {
                                                 miniTrayTrack = TrackMiniTrayData(
                                                     title = track.title,
@@ -490,10 +622,10 @@ fun FeedScreen(
                                                     artworkUrl = track.artworkUrl,
                                                     videoId = track.videoId.takeIf(String::isNotBlank),
                                                     sourceLabel = "Home",
-                                                    onPlay = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                                    onPlay = { viewModel.playTrack(track, section.title) },
                                                 )
                                             },
-                                            onPlayClick = { viewModel.playTracksQueue(section.items, index, section.title) },
+                                            onPlayClick = { viewModel.playTrack(track, section.title) },
                                         )
                                     }
                                 },
@@ -505,7 +637,7 @@ fun FeedScreen(
                     }
                     }
 
-                    if (isSectionVisible(HomeSection.FRESH_FINDS) && state.feedData.freshFinds.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.FRESH_FINDS) && state.feedData.freshFinds.isNotEmpty()) {
                         item(key = "fresh_finds") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -514,9 +646,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                                     FeedSectionHeader(
-                                        title = "Fresh finds",
-                                        subtitle = "New tracks beyond your usual rotation",
-                                        actionText = "Play all",
+                                        title = stringResource(R.string.feed_fresh),
+                                        subtitle = stringResource(R.string.feed_fresh_sub),
+                                        actionText = stringResource(R.string.feed_play_all),
                                         actionIcon = Icons.Filled.PlayArrow,
                                         onActionClick = { viewModel.playTracksQueue(state.feedData.freshFinds, 0, "Fresh Finds") },
                                         onShuffleClick = { viewModel.shuffleTracksQueue(state.feedData.freshFinds, "Fresh Finds") },
@@ -538,11 +670,11 @@ fun FeedScreen(
                                                             artworkUrl = track.artworkUrl,
                                                             videoId = track.videoId.takeIf(String::isNotBlank),
                                                             sourceLabel = "Home",
-                                                            onPlay = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
+                                                            onPlay = { viewModel.playTrack(track, "Fresh Finds") },
                                                         )
                                                     },
-                                                    onClick = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
-                                                    onPlayClick = { viewModel.playTracksQueue(state.feedData.freshFinds, index, "Fresh Finds") },
+                                                    onClick = { viewModel.playTrack(track, "Fresh Finds") },
+                                                    onPlayClick = { viewModel.playTrack(track, "Fresh Finds") },
                                                 )
                                             }
                                         },
@@ -552,7 +684,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.JUMP_BACK_IN) && state.feedData.jumpBackIn.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.JUMP_BACK_IN) && state.feedData.jumpBackIn.isNotEmpty()) {
                         item(key = "jump_back_in") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -561,9 +693,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                title = "Jump back in",
-                                subtitle = "From your listening history",
-                                actionText = "Play all",
+                                title = stringResource(R.string.feed_jump),
+                                subtitle = stringResource(R.string.feed_jump_sub),
+                                actionText = stringResource(R.string.feed_play_all),
                                 actionIcon = Icons.Filled.PlayArrow,
                                 onActionClick = { viewModel.playRecentQueue(state.feedData.jumpBackIn, 0) },
                             )
@@ -592,7 +724,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.MIXES) && state.feedData.mixes.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.MIXES) && state.feedData.mixes.isNotEmpty()) {
                         item(key = "mixed_for_you") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -601,9 +733,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                title = "Mixes to explore",
-                                subtitle = "Familiar favorites, fresh combinations",
-                                actionText = "Shuffle",
+                                title = stringResource(R.string.feed_mixes),
+                                subtitle = stringResource(R.string.feed_mixes_sub),
+                                actionText = stringResource(R.string.feed_shuffle),
                                 actionIcon = Icons.Filled.Shuffle,
                                 onActionClick = {
                                     state.feedData.mixes.randomOrNull()?.let(viewModel::playMix)
@@ -614,7 +746,7 @@ fun FeedScreen(
                                     items(state.feedData.mixes, key = { it.seed.videoId }) { mix ->
                                         FeedPlaylistCard(
                                             title = mix.title,
-                                            subtitle = "Endless artist radio",
+                                            subtitle = stringResource(R.string.feed_endless_radio),
                                             artworkUrl = mix.seed.artworkUrl,
                                             onClick = { viewModel.playMix(mix) },
                                             onPlayClick = { viewModel.playMix(mix) },
@@ -628,7 +760,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.SPOTLIGHT)) {
+                    if (showSynthetic && isSectionVisible(HomeSection.SPOTLIGHT)) {
                     state.feedData.spotlight?.let { spotlight ->
                         item(key = "spotlight_hero") {
                             SpotlightHeroCard(
@@ -644,7 +776,7 @@ fun FeedScreen(
                     }
                     }
 
-                    if (isSectionVisible(HomeSection.TOP_ARTISTS) && individualTopArtists.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.TOP_ARTISTS) && individualTopArtists.isNotEmpty()) {
                         item(key = "top_artists") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -653,8 +785,8 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                    title = "Artists for you",
-                                    subtitle = "Worth another listen",
+                                    title = stringResource(R.string.feed_artists),
+                                    subtitle = stringResource(R.string.feed_artists_sub),
                                 )
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 16.dp),
@@ -680,7 +812,7 @@ fun FeedScreen(
                         }
                         }
 
-                    if (isSectionVisible(HomeSection.HEAVY_ROTATION) && state.feedData.heavyRotation.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.HEAVY_ROTATION) && state.feedData.heavyRotation.isNotEmpty()) {
                         item(key = "heavy_rotation") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -689,9 +821,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                title = "Favorites to revisit",
-                                subtitle = "From your listening profile",
-                                actionText = "Play all",
+                                title = stringResource(R.string.feed_favorites),
+                                subtitle = stringResource(R.string.feed_favorites_sub),
+                                actionText = stringResource(R.string.feed_play_all),
                                 actionIcon = Icons.Filled.PlayArrow,
                                 onActionClick = { viewModel.playGeneratedQueue(state.feedData.heavyRotation, 0, "Heavy Rotation") },
                             )
@@ -724,7 +856,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.ALBUMS) && state.feedData.recentAlbums.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.ALBUMS) && state.feedData.recentAlbums.isNotEmpty()) {
                         item(key = "albums_in_rotation") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -733,8 +865,8 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                title = "Albums for you",
-                                subtitle = "Real albums from your taste — Last.fm tops + YT Music picks",
+                                title = stringResource(R.string.feed_albums),
+                                subtitle = stringResource(R.string.feed_albums_sub),
                             )
                             FeedMediaRow(
                                 content = {
@@ -761,7 +893,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.CHARTS) && state.feedData.charts.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.CHARTS) && state.feedData.charts.isNotEmpty()) {
                         item(key = "trending_charts") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -770,9 +902,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                title = "Trending now",
-                                subtitle = "Most popular right now · tap a rank to play",
-                                actionText = "Play all",
+                                title = stringResource(R.string.feed_trending),
+                                subtitle = stringResource(R.string.feed_trending_sub),
+                                actionText = stringResource(R.string.feed_play_all),
                                 actionIcon = Icons.Filled.PlayArrow,
                                 onActionClick = { viewModel.playTracksQueue(state.feedData.charts, 0, "Top Charts") },
                                 onShuffleClick = { viewModel.shuffleTracksQueue(state.feedData.charts, "Top Charts") },
@@ -786,7 +918,7 @@ fun FeedScreen(
                                     ChartTrackCard(
                                         rank = index + 1,
                                         track = track,
-                                        onClick = { viewModel.playTracksQueue(state.feedData.charts, index, "Top Charts") },
+                                        onClick = { viewModel.playTrack(track, "Top Charts") },
                                         onLongClick = {
                                             miniTrayTrack = TrackMiniTrayData(
                                                 title = track.title,
@@ -795,7 +927,7 @@ fun FeedScreen(
                                                 artworkUrl = track.artworkUrl,
                                                 videoId = track.videoId.takeIf(String::isNotBlank),
                                                 sourceLabel = "Home",
-                                                onPlay = { viewModel.playTracksQueue(state.feedData.charts, index, "Top Charts") },
+                                                onPlay = { viewModel.playTrack(track, "Top Charts") },
                                             )
                                         },
                                     )
@@ -807,7 +939,7 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.NEW_RELEASES) && state.feedData.newReleases.isNotEmpty()) {
+                    if (showSynthetic && isSectionVisible(HomeSection.NEW_RELEASES) && state.feedData.newReleases.isNotEmpty()) {
                         item(key = "new_releases") {
                             Surface(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -816,9 +948,9 @@ fun FeedScreen(
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 12.dp)) {
                             FeedSectionHeader(
-                                title = "New releases",
-                                subtitle = "Fresh drops and new albums",
-                                actionText = "See all",
+                                title = stringResource(R.string.feed_releases),
+                                subtitle = stringResource(R.string.feed_releases_sub),
+                                actionText = stringResource(R.string.feed_see_all),
                                 actionIcon = Icons.AutoMirrored.Filled.ArrowForwardIos,
                                 onActionClick = onOpenNewReleases,
                             )
@@ -848,43 +980,40 @@ fun FeedScreen(
                         }
                     }
 
-                    if (isSectionVisible(HomeSection.FRIENDS) && state.feedData.friends.isNotEmpty()) {
-                        item(key = "friends_activity") {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                                shape = RoundedCornerShape(24.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f),
-                            ) {
-                                Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                            FeedSectionHeader(
-                                title = "Your friends",
-                                subtitle = "People in your listening circle",
-                                actionText = "See all",
-                                actionIcon = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                                onActionClick = onOpenFriends,
-                            )
-                            LazyRow(
-                                contentPadding = PaddingValues(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                modifier = Modifier.padding(top = 12.dp),
-                            ) {
-                                items(state.feedData.friends) { friend ->
-                                    FriendAvatarCard(
-                                        friend = friend,
-                                        onClick = {
-                                            onOpenFriendProfile(friend.name, friend.displayName, friend.avatarUrl)
-                                        },
-                                    )
-                                }
-                            }
-                        
-                                }
+                    if (!state.isChipActive) {
+                        for ((shelfIndex, shelf) in state.pagedShelves.withIndex()) {
+                            if (shelf.items.isEmpty()) continue
+                            item(key = "paged_shelf_${shelfIndex}_${shelf.title}") {
+                                HomeShelfCard(
+                                    shelf = shelf,
+                                    onPlayTrack = { track, title -> viewModel.playTrack(track, title) },
+                                    onPlayTracksQueue = { tracks, idx, title -> viewModel.playTracksQueue(tracks, idx, title) },
+                                    onShuffleTracksQueue = { tracks, title -> viewModel.shuffleTracksQueue(tracks, title) },
+                                    onOpenFeedPlaylist = onOpenFeedPlaylist,
+                                    onOpenAlbum = { title, artist, id -> artistAlbumNavigator.openAlbum(title, artist, id) },
+                                    onTrackLongClick = { tray -> miniTrayTrack = tray },
+                                )
                             }
                         }
                     }
 
-                    item(key = "feed_footer") {
-                        FeedFooter(lastUpdatedMillis = state.feedData.lastUpdatedMillis)
+                    if (state.isLoadingMore) {
+                        item(key = "loading_more_indicator", contentType = "loading") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                ExpressiveInlineLoadingIndicator()
+                            }
+                        }
+                    }
+
+                    if (showSynthetic) {
+                        item(key = "feed_footer") {
+                            FeedFooter(lastUpdatedMillis = state.feedData.lastUpdatedMillis)
+                        }
                     }
                 }
             }
@@ -929,16 +1058,16 @@ private fun String.displayName(): String =
         it.replaceFirstChar { c -> c.uppercase() }
     }
 
-private fun relativeTime(uts: String?): String? {
+private fun relativeTime(context: android.content.Context, uts: String?): String? {
     val epoch = uts?.toLongOrNull() ?: return null
     val now = System.currentTimeMillis() / 1000
     val diff = (now - epoch).coerceAtLeast(0)
     return when {
-        diff < 3600 -> "${(diff / 60).coerceAtLeast(1)}m ago"
-        diff < 86400 -> "${diff / 3600}h ago"
-        diff < 86400 * 7 -> "${diff / 86400}d ago"
-        diff < 86400 * 30 -> "${diff / (86400 * 7)}w ago"
-        else -> "${diff / (86400 * 30)}mo ago"
+        diff < 3600 -> context.getString(R.string.feed_ago_min, (diff / 60).coerceAtLeast(1).toInt())
+        diff < 86400 -> context.getString(R.string.feed_ago_hour, (diff / 3600).toInt())
+        diff < 86400 * 7 -> context.getString(R.string.feed_ago_day, (diff / 86400).toInt())
+        diff < 86400 * 30 -> context.getString(R.string.feed_ago_week, (diff / (86400 * 7)).toInt())
+        else -> context.getString(R.string.feed_ago_month, (diff / (86400 * 30)).toInt())
     }
 }
 
@@ -1056,7 +1185,7 @@ private fun InfiniteRadioHero(
                     ) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Play", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.feed_play_cd), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1072,8 +1201,8 @@ private fun TasteStrip(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         FeedSectionHeader(
-            title = "Your Sound",
-            subtitle = "Tap a vibe to start instant radio",
+            title = stringResource(R.string.feed_your_sound),
+            subtitle = stringResource(R.string.feed_your_sound_sub),
         )
         LazyRow(
             contentPadding = PaddingValues(horizontal = 16.dp),
@@ -1112,7 +1241,7 @@ private fun TasteStrip(
                         if (isLoading) {
                             Icon(
                                 Icons.Filled.Refresh,
-                                contentDescription = "Starting radio",
+                                contentDescription = stringResource(R.string.feed_start_radio_cd),
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(14.dp),
                             )
@@ -1122,6 +1251,400 @@ private fun TasteStrip(
             }
         }
     }
+}
+
+/**
+ * Horizontally scrolling row of YouTube Music mood/activity chips
+ * (e.g., Relax, Energize, Workout, Commute, Focus).
+ * Placed directly above the native YTM shelves using the app's liquid-glass style.
+ * Adapted from Metrolist's Home screen chip row (GPL-3.0).
+ */
+@Composable
+fun HomeChipsRow(
+    chips: List<HomeChip>,
+    selectedChip: HomeChip?,
+    onChipClick: (HomeChip) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (chips.isEmpty()) return
+    val haptics = LocalHapticFeedback.current
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        items(chips, key = { it.title }) { chip ->
+            val isSelected = chip == selectedChip
+            Surface(
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onChipClick(chip)
+                },
+                shape = CircleShape,
+                color = if (isSelected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f)
+                },
+                border = BorderStroke(
+                    width = 1.dp,
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.22f)
+                    },
+                ),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = chip.title,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Pinned container for the YTM chip row. Sits directly under the app bar and
+ * stays visible while the feed scrolls, with a subtle gradient scrim behind
+ * it so content sliding underneath stays legible. Liquid-glass styled.
+ */
+@Composable
+private fun PinnedChipsBar(
+    chips: List<HomeChip>,
+    selectedChip: HomeChip?,
+    onChipClick: (HomeChip) -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    0f to MaterialTheme.colorScheme.background.copy(alpha = 0.96f),
+                    0.7f to MaterialTheme.colorScheme.background.copy(alpha = 0.82f),
+                    1f to MaterialTheme.colorScheme.background.copy(alpha = 0f),
+                )
+            ),
+    ) {
+        HomeChipsRow(
+            chips = chips,
+            selectedChip = selectedChip,
+            onChipClick = onChipClick,
+            modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+        )
+    }
+}
+
+/**
+ * Reusable surface card for a YouTube Music carousel shelf.
+ * Renders each item through the card system (square / wide / featured /
+ * community) chosen from the item's real YTM data, falling back to square.
+ * Used for page-1 native shelves, continuation paged shelves, and chip shelves.
+ */
+@Composable
+private fun HomeShelfCard(
+    shelf: HomeShelf,
+    onPlayTrack: (YouTubeMusicTrack, String) -> Unit,
+    onPlayTracksQueue: (List<YouTubeMusicTrack>, Int, String) -> Unit,
+    onShuffleTracksQueue: (List<YouTubeMusicTrack>, String) -> Unit,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+    onTrackLongClick: (TrackMiniTrayData) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (shelf.items.isEmpty()) return
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f),
+    ) {
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            val tracksInShelf = remember(shelf.items) {
+                shelf.items.mapNotNull { (it as? HomeShelfItem.Track)?.track }
+            }
+            // "More" only when the shelf's destination is a playlist/album id
+            // the app already knows how to open; mood/genre/chart browse ids
+            // aren't supported surfaces, so the chevron stays hidden for them.
+            val morePlaylistId = remember(shelf.moreBrowseId) {
+                shelf.moreBrowseId
+                    ?.removePrefix("VL")
+                    ?.takeIf { it.startsWith("PL") || it.startsWith("MPRE") || it.startsWith("RD") || it.startsWith("OLAK") }
+            }
+            com.lastwave.app.ui.feed.cards.ShelfHeaderV2(
+                title = shelf.title,
+                eyebrow = shelf.strapline,
+                subtitle = shelf.subtitle,
+                showMore = morePlaylistId != null,
+                onMoreClick = morePlaylistId?.let { { onOpenFeedPlaylist(it) } },
+                onPlayAll = if (tracksInShelf.isNotEmpty()) {
+                    { onPlayTracksQueue(tracksInShelf, 0, shelf.title) }
+                } else null,
+                onShuffle = if (tracksInShelf.isNotEmpty()) {
+                    { onShuffleTracksQueue(tracksInShelf, shelf.title) }
+                } else null,
+            )
+            FeedMediaRow(
+                content = {
+                    itemsIndexed(
+                        shelf.items,
+                        key = { _, item ->
+                            when (item) {
+                                is HomeShelfItem.Track -> "t_${item.track.videoId}"
+                                is HomeShelfItem.Playlist -> "p_${item.playlist.id}"
+                            }
+                        },
+                    ) { _, shelfItem ->
+                        Box(Modifier.animateItem()) {
+                            NativeShelfItemCard(
+                                shelfItem = shelfItem,
+                                shelfTitle = shelf.title,
+                                onPlayTrack = onPlayTrack,
+                                onOpenFeedPlaylist = onOpenFeedPlaylist,
+                                onOpenAlbum = onOpenAlbum,
+                                onTrackLongClick = onTrackLongClick,
+                            )
+                        }
+                    }
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Dispatches a single shelf item to its card variant based on the real YTM
+ * data (aspect ratio, caption, community preview songs). Unknown shapes fall
+ * back to the square card. Calls the same play/open/menu handlers as before.
+ */
+@Composable
+private fun NativeShelfItemCard(
+    shelfItem: HomeShelfItem,
+    shelfTitle: String,
+    onPlayTrack: (YouTubeMusicTrack, String) -> Unit,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+    onTrackLongClick: (TrackMiniTrayData) -> Unit,
+) {
+    when (val variant = com.lastwave.app.ui.feed.cards.selectCardVariant(shelfItem)) {
+        com.lastwave.app.ui.feed.cards.HomeCardVariant.WIDE -> WideItemCard(
+            shelfItem = shelfItem,
+            shelfTitle = shelfTitle,
+            onPlayTrack = onPlayTrack,
+            onOpenFeedPlaylist = onOpenFeedPlaylist,
+            onOpenAlbum = onOpenAlbum,
+            onTrackLongClick = onTrackLongClick,
+        )
+        com.lastwave.app.ui.feed.cards.HomeCardVariant.FEATURED -> FeaturedItemCard(
+            shelfItem = shelfItem,
+            shelfTitle = shelfTitle,
+            onPlayTrack = onPlayTrack,
+            onOpenFeedPlaylist = onOpenFeedPlaylist,
+            onOpenAlbum = onOpenAlbum,
+            onTrackLongClick = onTrackLongClick,
+        )
+        com.lastwave.app.ui.feed.cards.HomeCardVariant.COMMUNITY -> {
+            val item = shelfItem as? HomeShelfItem.Playlist ?: return
+            CommunityItemCard(
+                item = item,
+                shelfTitle = shelfTitle,
+                onPlayTrack = onPlayTrack,
+                onOpenFeedPlaylist = onOpenFeedPlaylist,
+                onOpenAlbum = onOpenAlbum,
+                onTrackLongClick = onTrackLongClick,
+            )
+        }
+        else -> SquareItemCard(
+            shelfItem = shelfItem,
+            shelfTitle = shelfTitle,
+            onPlayTrack = onPlayTrack,
+            onOpenFeedPlaylist = onOpenFeedPlaylist,
+            onOpenAlbum = onOpenAlbum,
+            onTrackLongClick = onTrackLongClick,
+        )
+    }
+}
+
+/** Builds the track mini-tray payload used by every card's long-press. */
+private fun trackTray(track: YouTubeMusicTrack, shelfTitle: String, onPlayTrack: (YouTubeMusicTrack, String) -> Unit) =
+    TrackMiniTrayData(
+        title = track.title,
+        artist = track.artist,
+        album = track.album,
+        artworkUrl = track.artworkUrl,
+        videoId = track.videoId.takeIf(String::isNotBlank),
+        sourceLabel = "Home",
+        onPlay = { onPlayTrack(track, shelfTitle) },
+    )
+
+private fun playlistInfoLine(p: com.lastwave.app.data.music.YouTubePlaylistSummary): String =
+    listOfNotNull(
+        p.author,
+        p.trackCountText,
+    ).joinToString(" • ").ifBlank { p.author.orEmpty() }
+
+private fun openPlaylistOrAlbum(
+    playlist: com.lastwave.app.data.music.YouTubePlaylistSummary,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+) {
+    if (playlist.id.startsWith("MPRE")) {
+        onOpenAlbum(playlist.title, playlist.author.orEmpty(), playlist.id)
+    } else {
+        onOpenFeedPlaylist(playlist.id)
+    }
+}
+
+@Composable
+private fun SquareItemCard(
+    shelfItem: HomeShelfItem,
+    shelfTitle: String,
+    onPlayTrack: (YouTubeMusicTrack, String) -> Unit,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+    onTrackLongClick: (TrackMiniTrayData) -> Unit,
+) {
+    when (shelfItem) {
+        is HomeShelfItem.Track -> {
+            val track = shelfItem.track
+            com.lastwave.app.ui.feed.cards.ShelfSquareCard(
+                title = track.title,
+                infoLine = ArtistHelper.primaryArtist(track.artist),
+                artworkUrl = track.artworkUrl,
+                fallbackIcon = Icons.Filled.MusicNote,
+                onClick = { onPlayTrack(track, shelfTitle) },
+                onLongClick = { onTrackLongClick(trackTray(track, shelfTitle, onPlayTrack)) },
+                onPlayClick = { onPlayTrack(track, shelfTitle) },
+                cardWidth = com.lastwave.app.ui.feed.cards.rememberSquareCardWidth(),
+            )
+        }
+        is HomeShelfItem.Playlist -> {
+            val p = shelfItem.playlist
+            com.lastwave.app.ui.feed.cards.ShelfSquareCard(
+                title = p.title,
+                infoLine = playlistInfoLine(p),
+                artworkUrl = p.artworkUrl,
+                fallbackIcon = Icons.AutoMirrored.Filled.QueueMusic,
+                onClick = { openPlaylistOrAlbum(p, onOpenFeedPlaylist, onOpenAlbum) },
+                cardWidth = com.lastwave.app.ui.feed.cards.rememberSquareCardWidth(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun WideItemCard(
+    shelfItem: HomeShelfItem,
+    shelfTitle: String,
+    onPlayTrack: (YouTubeMusicTrack, String) -> Unit,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+    onTrackLongClick: (TrackMiniTrayData) -> Unit,
+) {
+    when (shelfItem) {
+        is HomeShelfItem.Track -> {
+            val track = shelfItem.track
+            com.lastwave.app.ui.feed.cards.ShelfWideCard(
+                title = track.title,
+                infoLine = ArtistHelper.primaryArtist(track.artist),
+                artworkUrl = track.artworkUrl,
+                onClick = { onPlayTrack(track, shelfTitle) },
+                onLongClick = { onTrackLongClick(trackTray(track, shelfTitle, onPlayTrack)) },
+                onPlayClick = { onPlayTrack(track, shelfTitle) },
+                cardWidth = com.lastwave.app.ui.feed.cards.rememberWideCardWidth(),
+            )
+        }
+        is HomeShelfItem.Playlist -> {
+            val p = shelfItem.playlist
+            com.lastwave.app.ui.feed.cards.ShelfWideCard(
+                title = p.title,
+                infoLine = playlistInfoLine(p),
+                artworkUrl = p.artworkUrl,
+                fallbackIcon = Icons.AutoMirrored.Filled.QueueMusic,
+                onClick = { openPlaylistOrAlbum(p, onOpenFeedPlaylist, onOpenAlbum) },
+                cardWidth = com.lastwave.app.ui.feed.cards.rememberWideCardWidth(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun FeaturedItemCard(
+    shelfItem: HomeShelfItem,
+    shelfTitle: String,
+    onPlayTrack: (YouTubeMusicTrack, String) -> Unit,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+    onTrackLongClick: (TrackMiniTrayData) -> Unit,
+) {
+    when (shelfItem) {
+        is HomeShelfItem.Track -> {
+            val track = shelfItem.track
+            com.lastwave.app.ui.feed.cards.ShelfFeaturedCard(
+                title = track.title,
+                artist = ArtistHelper.primaryArtist(track.artist),
+                artworkUrl = track.artworkUrl,
+                caption = shelfItem.caption,
+                onClick = { onPlayTrack(track, shelfTitle) },
+                onLongClick = { onTrackLongClick(trackTray(track, shelfTitle, onPlayTrack)) },
+                cardWidth = com.lastwave.app.ui.feed.cards.rememberFeaturedCardWidth(),
+            )
+        }
+        is HomeShelfItem.Playlist -> {
+            val p = shelfItem.playlist
+            com.lastwave.app.ui.feed.cards.ShelfFeaturedCard(
+                title = p.title,
+                artist = playlistInfoLine(p),
+                artworkUrl = p.artworkUrl,
+                caption = shelfItem.caption,
+                fallbackIcon = Icons.AutoMirrored.Filled.QueueMusic,
+                onClick = { openPlaylistOrAlbum(p, onOpenFeedPlaylist, onOpenAlbum) },
+                cardWidth = com.lastwave.app.ui.feed.cards.rememberFeaturedCardWidth(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CommunityItemCard(
+    item: HomeShelfItem.Playlist,
+    shelfTitle: String,
+    onPlayTrack: (YouTubeMusicTrack, String) -> Unit,
+    onOpenFeedPlaylist: (String) -> Unit,
+    onOpenAlbum: (title: String, artist: String, browseId: String) -> Unit,
+    onTrackLongClick: (TrackMiniTrayData) -> Unit,
+) {
+    val p = item.playlist
+    com.lastwave.app.ui.feed.cards.ShelfCommunityPlaylistCard(
+        title = p.title,
+        subtitle = playlistInfoLine(p),
+        collageUrls = item.collageArtworkUrls,
+        songs = item.previewSongs,
+        artworkUrl = p.artworkUrl,
+        onClick = { openPlaylistOrAlbum(p, onOpenFeedPlaylist, onOpenAlbum) },
+        onPlayClick = {
+            if (item.previewSongs.isNotEmpty()) {
+                onPlayTrack(item.previewSongs.first(), p.title)
+            } else {
+                openPlaylistOrAlbum(p, onOpenFeedPlaylist, onOpenAlbum)
+            }
+        },
+        onSongClick = { onPlayTrack(it, p.title) },
+        onSongMenuClick = { onTrackLongClick(trackTray(it, p.title, onPlayTrack)) },
+        cardWidth = com.lastwave.app.ui.feed.cards.rememberCommunityCardWidth(),
+    )
 }
 
 @Composable
@@ -1211,15 +1734,16 @@ private fun FeedLoadingSkeleton() {
 
 @Composable
 private fun FeedFooter(lastUpdatedMillis: Long) {
+    val context = LocalContext.current
     val label = remember(lastUpdatedMillis) {
-        if (lastUpdatedMillis <= 0L) "Made for you from your taste"
+        if (lastUpdatedMillis <= 0L) context.getString(R.string.feed_footer_default)
         else try {
             val time = java.time.Instant.ofEpochMilli(lastUpdatedMillis)
                 .atZone(java.time.ZoneId.systemDefault())
                 .format(java.time.format.DateTimeFormatter.ofPattern("h:mm a"))
-            "Updated $time · Made for you from your taste"
+            context.getString(R.string.feed_footer_updated, time)
         } catch (_: Exception) {
-            "Made for you from your taste"
+            context.getString(R.string.feed_footer_default)
         }
     }
     Box(
@@ -1267,6 +1791,7 @@ private fun QuickTileCard(
     val tileShape = RoundedCornerShape(18.dp)
 
     // Per-type vibrant gradient pairs for the artwork/icon box matching modern expressive designs
+    val isLiveMapTile = tile.collection == "live_map"
     val isYtLikedTile = tile.collection == "yt_liked" || tile.playlistId == "yt_liked"
     val isLocalLikedTile = tile.isLiked && !isYtLikedTile
     val isLikedTile = isYtLikedTile || isLocalLikedTile
@@ -1276,6 +1801,9 @@ private fun QuickTileCard(
     val isNewReleasesTile = tile.collection == "new_releases"
 
     val iconGradient = when {
+        isLiveMapTile -> Brush.linearGradient(
+            colors = listOf(MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.tertiary),
+        )
         isLikedTile -> Brush.linearGradient(
             colors = listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.primary),
         )
@@ -1303,6 +1831,7 @@ private fun QuickTileCard(
         onClick = onClick,
         shape = tileShape,
         color = when {
+            isLiveMapTile -> MaterialTheme.colorScheme.tertiaryContainer
             isLikedTile -> MaterialTheme.colorScheme.primaryContainer
             isMixTile -> MaterialTheme.colorScheme.secondaryContainer
             isMyMixTile -> MaterialTheme.colorScheme.surfaceVariant
@@ -1331,7 +1860,14 @@ private fun QuickTileCard(
                     .background(iconGradient),
                 contentAlignment = Alignment.Center,
             ) {
-                if (isYtLikedTile) {
+                if (isLiveMapTile) {
+                    Icon(
+                        Icons.Filled.Public,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.size(36.dp),
+                    )
+                } else if (isYtLikedTile) {
                     Icon(
                         Icons.Filled.ThumbUp,
                         contentDescription = null,
@@ -1514,7 +2050,7 @@ private fun QuickPicksRows(
                             ) {
                                 Icon(
                                     Icons.Filled.MoreVert,
-                                    contentDescription = "More options for ${track.title}",
+                                    contentDescription = stringResource(R.string.feed_more_cd, track.title),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                                     modifier = Modifier.size(20.dp),
                                 )
@@ -1628,7 +2164,7 @@ private fun FeedMediaCard(
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Filled.PlayArrow,
-                            contentDescription = "Play $title",
+                            contentDescription = stringResource(R.string.feed_play_title_cd, title),
                             tint = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier.size(20.dp),
                         )
@@ -1687,7 +2223,8 @@ private fun RecentTrackCard(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
 ) {
-    val ago = remember(track.date?.uts, track.url) { relativeTime(track.date?.uts) }
+    val context = LocalContext.current
+    val ago = remember(track.date?.uts, track.url) { relativeTime(context, track.date?.uts) }
     val primaryArtistName = remember(track.artist.displayName) { ArtistHelper.primaryArtist(track.artist.displayName) }
     val subtitle = if (ago != null) "$primaryArtistName · $ago" else primaryArtistName
     val haptics = LocalHapticFeedback.current
@@ -1947,7 +2484,7 @@ private fun SpotlightHeroCard(
                         if (!spotlight.artworkUrl.isNullOrBlank()) {
                             AsyncImage(
                                 model = spotlight.artworkUrl,
-                                contentDescription = "Open $primaryArtistName",
+                                contentDescription = stringResource(R.string.feed_open_artist_cd, primaryArtistName),
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize(),
                             )
@@ -2014,7 +2551,7 @@ private fun SpotlightHeroCard(
                     ) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Artist radio", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.feed_artist_radio), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                     }
                     Surface(
                         onClick = onOpenArtist,
@@ -2246,7 +2783,7 @@ private fun FeedSectionHeader(
                 ) {
                     Icon(
                         Icons.Filled.Shuffle,
-                        contentDescription = "Shuffle $title",
+                        contentDescription = stringResource(R.string.feed_shuffle_title_cd, title),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
                     )
@@ -2345,7 +2882,7 @@ private fun FeedEmptyState(
             ) {
                 Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Search music", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.feed_search_music), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
             }
             Surface(
                 onClick = onRetry,

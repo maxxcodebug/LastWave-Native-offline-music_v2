@@ -49,12 +49,16 @@ data class ThemeUiState(
     /** Experimental liquid-glass materials (Settings → Experimental). When
      *  true, container roles in [colorScheme] are semi-translucent and the
      *  chrome surfaces get specular glass dressing. */
-    val liquidGlass: Boolean = false,
+    val liquidGlass: Boolean = true,
+    val md3NavBar: Boolean = false,
+    val hideNavTabs: Boolean = false,
     /** True when the "Dynamic Now Playing" artwork override is currently
      *  driving the schemes. LastWaveTheme uses this so S+ system dynamic
      *  (wallpaper) only takes over when no now-playing color is active:
      *  now-playing wins, wallpaper-dynamic is next, manual/mono last. */
     val isNowPlayingThemed: Boolean = false,
+    /** Dedicated LastWave Signature Theme inspired by the app logo icon (#C9FB00 & #012226). */
+    val isLastWaveTheme: Boolean = false,
 )
 
 @Singleton
@@ -211,8 +215,14 @@ class ThemeRepository @Inject constructor(
     ) { prefs: ThemePrefs, dynamic: String?, nowPlaying: String?, misc: MiscSettings ->
         val isAmoled = prefs.amoled
         val isGlass = prefs.liquidGlass
-        val nowPlayingActive = misc.dynamicNowPlayingEnabled && nowPlaying != null
+        val isLastWave = prefs.lastWaveTheme
+        val nowPlayingActive = misc.dynamicNowPlayingEnabled && nowPlaying != null && !isLastWave
         val (darkScheme, lightScheme) = when {
+            isLastWave -> {
+                val dark = Md3SchemeBuilder.buildLastWaveDarkScheme(isAmoled, isGlass)
+                val light = Md3SchemeBuilder.buildLastWaveLightScheme(isGlass)
+                dark to light
+            }
             nowPlayingActive -> {
                 val dark = Md3SchemeBuilder.buildDarkScheme(nowPlaying!!, isAmoled, isGlass)
                 val light = Md3SchemeBuilder.buildLightScheme(nowPlaying, isGlass)
@@ -247,30 +257,38 @@ class ThemeRepository @Inject constructor(
             colorScheme = darkScheme,
             amoled = isAmoled,
             mode = prefs.accentMode,
-            accentColorHex = prefs.accentColor,
+            accentColorHex = if (isLastWave) "#C9FB00" else prefs.accentColor,
             useCustomFont = misc.useCustomFont,
             liquidGlass = isGlass,
+            md3NavBar = prefs.md3NavBar,
+            hideNavTabs = prefs.hideNavTabs,
             isNowPlayingThemed = nowPlayingActive,
+            isLastWaveTheme = isLastWave,
         )
     }.stateIn(
         applicationScope,
         SharingStarted.Eagerly,
         ThemeUiState(
-            darkColorScheme = Md3SchemeBuilder.buildDarkScheme("#E03030", false),
-            lightColorScheme = Md3SchemeBuilder.buildLightScheme("#E03030", false),
+            darkColorScheme = Md3SchemeBuilder.buildDarkScheme("#E03030", false, true),
+            lightColorScheme = Md3SchemeBuilder.buildLightScheme("#E03030", true),
             themeMode = ThemeMode.SYSTEM,
-            colorScheme = Md3SchemeBuilder.buildDarkScheme("#E03030", false),
+            colorScheme = Md3SchemeBuilder.buildDarkScheme("#E03030", false, true),
             amoled = false,
             mode = AccentMode.MANUAL,
             accentColorHex = "#E03030",
             useCustomFont = true,
-            liquidGlass = false,
+            liquidGlass = true,
+            md3NavBar = false,
+            hideNavTabs = false,
+            isLastWaveTheme = false,
         ),
     )
 
     suspend fun setThemeMode(mode: ThemeMode) {
         themePreferences.setThemeMode(mode)
     }
+
+    suspend fun setLastWaveTheme(enabled: Boolean) = themePreferences.setLastWaveTheme(enabled)
 
     /** Manual pick always leaves DYNAMIC/MONOCHROME: choosing your own accent
      *  turns Dynamic Color off itself (ThemePreferences persists MANUAL). */
@@ -287,6 +305,9 @@ class ThemeRepository @Inject constructor(
     suspend fun setAmoled(enabled: Boolean) = themePreferences.setAmoled(enabled)
 
     suspend fun setLiquidGlass(enabled: Boolean) = themePreferences.setLiquidGlass(enabled)
+
+    suspend fun setMd3NavBar(enabled: Boolean) = themePreferences.setMd3NavBar(enabled)
+    suspend fun setHideNavTabs(enabled: Boolean) = themePreferences.setHideNavTabs(enabled)
 
     /** Turning this on used to just flip the DataStore flag and wait for
      *  Home's own poll loop to eventually call updateNowPlayingArtwork() —

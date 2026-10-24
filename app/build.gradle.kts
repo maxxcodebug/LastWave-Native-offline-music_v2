@@ -60,8 +60,8 @@ android {
         applicationId = "com.lastwave.app"
         minSdk = (project.findProperty("minSdk") as? String)?.toIntOrNull() ?: 29
         targetSdk = 35
-        versionCode = 24
-        versionName = "4.2.4"
+        versionCode = 26
+        versionName = "4.3.1"
 
         val lastWaveLyricsToken = resolveSecret("LASTWAVE_LYRICS_TOKEN")
         val lastWaveLyricsUrl = resolveSecret("LASTWAVE_LYRICS_URL")
@@ -248,11 +248,13 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.serialization.protobuf)
 
     implementation(libs.retrofit.core)
     implementation(libs.retrofit.kotlinx.serialization)
     implementation(libs.okhttp.core)
     implementation(libs.okhttp.logging)
+    implementation(libs.jsoup)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)

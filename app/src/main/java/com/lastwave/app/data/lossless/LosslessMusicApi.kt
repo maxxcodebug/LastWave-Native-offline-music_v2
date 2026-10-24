@@ -685,8 +685,25 @@ class LosslessMusicApi @Inject constructor(
                     isDownload = isDownload,
                 )
             }.getOrNull()
-            if (resolved == null) noteBackendFailure()
-            return@withContext resolved
+            if (resolved != null) return@withContext resolved
+
+            // Atmos fallback: if Dolby Atmos was selected but not found on the track,
+            // fall back to stereo hi-res / lossless rather than failing and cooling down the backend.
+            if (preferredQuality == QUALITY_DOLBY_ATMOS) {
+                Log.i(TAG, "resolveStream: Dolby Atmos not found for '$title' by '$artist', falling back to stereo lossless")
+                return@withContext resolveStream(
+                    title = title,
+                    artist = artist,
+                    expectedDurationSeconds = expectedDurationSeconds,
+                    expectedAlbum = expectedAlbum,
+                    preferredQuality = QUALITY_MAX_HI_RES,
+                    excludedUrls = excludedUrls,
+                    isDownload = isDownload,
+                )
+            }
+
+            noteBackendFailure()
+            return@withContext null
         }
 
         Log.i(TAG, "resolveStream racing for '$title' by '$artist' across ${allCreds.size} addons concurrently (preferredQuality=$preferredQuality, isDownload=$isDownload)")
@@ -709,6 +726,21 @@ class LosslessMusicApi @Inject constructor(
 
         val candidates = deferreds.awaitAll().filterNotNull()
         if (candidates.isEmpty()) {
+            // Atmos fallback: if Dolby Atmos was selected but not found across addons,
+            // fall back to stereo hi-res / lossless rather than failing and cooling down the backend.
+            if (preferredQuality == QUALITY_DOLBY_ATMOS) {
+                Log.i(TAG, "resolveStream: Dolby Atmos not found across addons for '$title' by '$artist', falling back to stereo lossless")
+                return@withContext resolveStream(
+                    title = title,
+                    artist = artist,
+                    expectedDurationSeconds = expectedDurationSeconds,
+                    expectedAlbum = expectedAlbum,
+                    preferredQuality = QUALITY_MAX_HI_RES,
+                    excludedUrls = excludedUrls,
+                    isDownload = isDownload,
+                )
+            }
+
             noteBackendFailure()
             return@withContext null
         }
@@ -986,15 +1018,26 @@ class LosslessMusicApi @Inject constructor(
                 failureCooldownUntilMs = 0L
 
                 val lowerUrlPath = rawUrl.substringBefore('?').lowercase()
+                val isExplicitDash = rawUrl.startsWith("data:application/dash+xml") ||
+                    lowerUrlPath.endsWith(".mpd") || lowerUrlPath.contains("/mpd")
                 val streamMimeType = when {
-                    rawUrl.startsWith("data:application/dash+xml") -> "application/dash+xml"
-                    lowerUrlPath.endsWith(".mpd") -> "application/dash+xml"
-                    lowerUrlPath.endsWith(".m3u8") -> "application/x-mpegURL"
+                    isExplicitDash -> "application/dash+xml"
+                    lowerUrlPath.endsWith(".m3u8") || lowerUrlPath.contains(".m3u8") -> "application/x-mpegURL"
                     // Atmos arrives as a direct progressive E-AC-3 MP4.
                     isStreamAtmos -> "audio/mp4"
                     lowerUrlPath.endsWith(".flac") -> "audio/flac"
                     lowerUrlPath.endsWith(".mp4") || lowerUrlPath.endsWith(".m4a") -> "audio/mp4"
-                    else -> "application/dash+xml"
+                    lowerUrlPath.endsWith(".mp3") -> "audio/mpeg"
+                    lowerUrlPath.endsWith(".aac") -> "audio/aac"
+                    lowerUrlPath.endsWith(".ogg") || lowerUrlPath.endsWith(".opus") -> "audio/ogg"
+                    streamCodec.contains("mp3") -> "audio/mpeg"
+                    streamCodec.contains("aac") -> "audio/mp4"
+                    streamCodec.contains("mp4a") -> "audio/mp4"
+                    streamCodec.contains("opus") -> "audio/ogg"
+                    streamCodec.contains("flac") -> "audio/flac"
+                    formatId == QUALITY_MP3_320 -> "audio/mpeg"
+                    formatId == QUALITY_DATA_SAVER -> "audio/mp4"
+                    else -> "audio/flac"
                 }
 
                 val resolvedBitrateKbps = stream?.bitrate?.let { if (it > 10_000) it / 1000 else it }

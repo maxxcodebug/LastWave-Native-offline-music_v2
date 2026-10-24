@@ -7,6 +7,8 @@ import com.lastwave.app.data.local.db.AppDatabase
 import com.lastwave.app.data.local.db.ArtworkCacheDao
 import com.lastwave.app.data.local.db.SavedPlaylistDao
 import com.lastwave.app.data.local.db.RecommendationExclusionDao
+import com.lastwave.app.data.local.db.RelatedGraphDao
+import com.lastwave.app.data.podcast.PodcastProgressDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -260,6 +262,58 @@ object DatabaseModule {
         }
     }
 
+    private val migration13To14 = object : Migration(13, 14) {
+        override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `related_graph_edges` (
+                    `sourceVideoId` TEXT NOT NULL,
+                    `relatedVideoId` TEXT NOT NULL,
+                    `title` TEXT NOT NULL DEFAULT '',
+                    `artist` TEXT NOT NULL DEFAULT '',
+                    `album` TEXT,
+                    `artworkUrl` TEXT,
+                    `durationSeconds` INTEGER,
+                    `seenCount` INTEGER NOT NULL DEFAULT 1,
+                    `firstSeenAtMillis` INTEGER NOT NULL,
+                    `lastSeenAtMillis` INTEGER NOT NULL,
+                    PRIMARY KEY(`sourceVideoId`, `relatedVideoId`)
+                )
+                """.trimIndent(),
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_related_graph_edges_relatedVideoId` ON `related_graph_edges` (`relatedVideoId`)",
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_related_graph_edges_lastSeenAtMillis` ON `related_graph_edges` (`lastSeenAtMillis`)",
+            )
+        }
+    }
+
+    private val migration14To15 = object : Migration(14, 15) {
+        override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `podcast_progress` (
+                    `videoId` TEXT NOT NULL,
+                    `showId` TEXT,
+                    `positionMs` INTEGER NOT NULL DEFAULT 0,
+                    `durationMs` INTEGER NOT NULL DEFAULT 0,
+                    `completed` INTEGER NOT NULL DEFAULT 0,
+                    `updatedAtMillis` INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(`videoId`)
+                )
+                """.trimIndent(),
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_podcast_progress_showId` ON `podcast_progress` (`showId`)",
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_podcast_progress_updatedAtMillis` ON `podcast_progress` (`updatedAtMillis`)",
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -279,6 +333,8 @@ object DatabaseModule {
                 migration10To11,
                 migration11To12,
                 migration12To13,
+                migration13To14,
+                migration14To15,
             )
             .build()
 
@@ -304,4 +360,14 @@ object DatabaseModule {
     @Singleton
     fun provideSongPlayStatsDao(database: AppDatabase): com.lastwave.app.data.local.db.SongPlayStatsDao =
         database.songPlayStatsDao()
+
+    @Provides
+    @Singleton
+    fun provideRelatedGraphDao(database: AppDatabase): RelatedGraphDao =
+        database.relatedGraphDao()
+
+    @Provides
+    @Singleton
+    fun providePodcastProgressDao(database: AppDatabase): PodcastProgressDao =
+        database.podcastProgressDao()
 }

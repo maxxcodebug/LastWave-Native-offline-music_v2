@@ -1,5 +1,36 @@
 # Changelog
 
+## [4.3.1] - 2026-10-18
+
+### Added & Improved
+- **YouTube Music Cookie Login:** Support for raw `Cookie` headers, Netscape `cookies.txt`, and browser extension JSON exports with clipboard paste helpers and real-time validation (matching Desktop).
+- **Poweramp-Style Signal Path Redesign:** Reorganized the Output Detector dialog into Poweramp's 5-stage pipeline flow (Source $\to$ DSP $\to$ Volume Control $\to$ Output $\to$ Output Device) with status cards.
+- **Smart Feed Queues & Continuation:** Tapping any track in feed shelves now starts context-aware radio (`startRadio = true`) for dynamic playback, while "Play All" and "Shuffle" continuously auto-extend queues.
+- **Discovery Recommendation Quality:** Added strict deduplication against listening history and saved playlists, capped artists to 1 per batch, and removed raw history feed injection.
+- **Faster Feed Loading:** Eliminated blocking artist page network fetches, added in-memory artist caching, and bounded discovery graph queries with timeouts for near-instant rendering.
+
+### Changed & Fixed
+- **Crossfade Audio Focus:** Fixed pause loop in standby player handoff by preventing ExoPlayer focus manager collisions.
+- **USB DAC Bit-Perfect Alignment:** Aligned bit-perfect detection with Poweramp definitions and protected against read-only direct buffer crashes.
+- **Version Bump:** Bumped version to 4.3.1 (versionCode 26).
+
+## [4.3.0] - 2026-10-17
+
+### Added & Improved
+- **Share Lyrics Card:** Select up to 5 lines from synced or plain lyrics to generate styled lyric cards. Choose between Song Mode (album art header + track metadata + lyrics) and Lyrics Mode (clean typography), customize with dynamic palette extraction (cover tones, dominant, muted, dark, accent, or LastWave Lime), and export via the system share sheet or save directly to Pictures/LastWave with full multilingual font rendering (Latin, Devanagari, Arabic, CJK).
+- **Lyrics Romanization & Translation:** Added inline romanization and real-time translation support for non-Latin scripts directly within the lyrics view.
+- **Expanded Lyrics Providers:** Integrated additional lyrics sources for broader catalog coverage, higher match rates, and more reliable synced timestamps.
+- **Faster Playback & Multi-Provider Addons:** Optimized stream initialization for faster playback startup and introduced simultaneous multi-provider addon support for an expanded, unified library.
+- **Motion Lyrics Background:** Added dynamic, fluid motion canvas backgrounds synchronized to the active album art inside the lyrics screen.
+- **UAC1 & USB DAC Bit-Perfect Fixes:** Resolved UAC1 compatibility issues, improved hardware sample rate handshakes, and stabilized bit-perfect USB DAC audio routing.
+- **Local Device Library Support:** Added full on-device audio scanning, metadata parsing, and seamless local song playback right alongside your streaming library.
+- **100% Localization Coverage:** Complete translation across all 12 supported locales.
+- **Dynamic APK Variant Selection:** Automatically detects device architecture and system version to download the appropriate APK variant (universal, uncompressed, or android7).
+- **Audio Fallback:** Falls back to stereo lossless when Dolby Atmos is unavailable.
+
+### Changed & Fixed
+- **Version Bump:** Bumped version to 4.3.0 (versionCode 25).
+
 ## [4.2.4] - 2026-10-05
 
 ### Added & Improved

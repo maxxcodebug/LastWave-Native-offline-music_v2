@@ -35,31 +35,6 @@ data class HttpAddonConfig(
     val enabled: Boolean = true,
 )
 
-enum class LyricsUiVersion(val id: String, val title: String) {
-    CLASSIC("classic", "Classic"),
-    MODERN("modern", "Modern");
-
-    companion object {
-        fun fromId(id: String?): LyricsUiVersion =
-            entries.firstOrNull { it.id == id } ?: MODERN
-    }
-}
-
-enum class LyricsAnimation(val id: String, val title: String, val description: String) {
-    APPLE_FLUID("apple_fluid", "Apple Fluid", "Smooth spring scaling with dynamic focal tracking"),
-    KARAOKE_PULSE("karaoke_pulse", "Karaoke Pulse", "Rhythmic scale pop with energetic spring bounce"),
-    KINETIC_SLIDE("kinetic_slide", "Kinetic Slide", "Active line glides smoothly from leading edge"),
-    CINEMATIC_BLUR("cinematic_blur", "Cinematic Focus", "Soft background blur & vertical drift on past lines"),
-    LOSSLESS_GLOW("lossless_glow", "Lossless Glow", "Vibrant gradient text with frosted glass reflection"),
-    CARD_POP("card_pop", "Glass Elevation", "3D floating glass card lift with specular highlights"),
-    APPLE_ZOOM("apple_zoom", "Dynamic Focus Zoom", "Expanded focal magnification with fluid spring push"),
-    MINIMAL_WAVE("minimal_wave", "Minimal Clean", "Pure low-latency opacity transitions without distortion");
-
-    companion object {
-        fun fromId(id: String?): LyricsAnimation =
-            entries.firstOrNull { it.id == id } ?: APPLE_FLUID
-    }
-}
 
 /** Preferred lyrics source. Apple Music (syllable-synced) is the default:
  *  it is tried first and the app falls through to the rest automatically
@@ -69,17 +44,28 @@ enum class LyricsAnimation(val id: String, val title: String, val description: S
 enum class LyricsProvider(val id: String, val title: String, val subtitle: String) {
     AUTO("auto", "Auto", "Fastest word-sync wins, LRCLIB fallback"),
     LASTWAVE("lastwave", "LastWave", "Syllable & line-synced Apple lyrics first"),
+    LRC_RED("lrc_red", "lrc.red", "ISRC-indexed syllable TTML & LRC first"),
     APPLE_MUSIC("apple_music", "Apple Music", "Syllable-synced Apple Music lyrics first"),
     BETTER_LYRICS("better_lyrics", "BetterLyrics", "Word-synced lyrics first"),
+    BETTER_LYRICS_PORTATO("better_lyrics_portato", "QQ Karaoke", "QQ Music karaoke word timings first"),
     KUGOU("kugou", "Kugou", "KRC word-synced lyrics first"),
     BINI_LYRICS("bini_lyrics", "Syllable-Sync", "Recording-matched syllable lyrics first"),
     SIMP_MUSIC("simp_music", "Video-Match", "Matched on the playing video first"),
     MUSIXMATCH("musixmatch", "Catalog", "Largest catalogue line-sync first"),
-    LRCLIB("lrclib", "LRCLIB", "Line-synced community lyrics first");
+    LRCLIB("lrclib", "LRCLIB", "Line-synced community lyrics first"),
+    LYRICS_PLUS("lyrics_plus", "LyricsPlus", "Syllable-synced on community mirrors first"),
+    UNISON("unison", "Unison", "Community-submitted synced lyrics first"),
+    YOUTUBE_CAPTIONS("youtube_captions", "YouTube Captions", "Timed captions from the playing video first"),
+    YOUTUBE_MUSIC("youtube_music", "YouTube Music", "Plain lyrics from the video's Lyrics tab first"),
+    MEGALOBIZ("megalobiz", "Megalobiz", "Community line-synced LRC first"),
+    SPOTIFY("spotify", "Spotify", "Spotify Color Lyrics time-synced lyrics first"),
+    GENIUS("genius", "Genius", "Plain-text web catalogue, tried last");
 
     val isWordProvider: Boolean get() =
-        this == LASTWAVE || this == APPLE_MUSIC || this == BETTER_LYRICS || this == KUGOU ||
-            this == BINI_LYRICS || this == SIMP_MUSIC || this == MUSIXMATCH
+        this == LASTWAVE || this == LRC_RED || this == APPLE_MUSIC || this == BETTER_LYRICS || this == KUGOU ||
+            this == BINI_LYRICS || this == SIMP_MUSIC || this == MUSIXMATCH || this == SPOTIFY ||
+            this == BETTER_LYRICS_PORTATO || this == LYRICS_PLUS || this == UNISON ||
+            this == YOUTUBE_CAPTIONS || this == YOUTUBE_MUSIC || this == MEGALOBIZ || this == GENIUS
 
     companion object {
         fun fromId(id: String?): LyricsProvider =
@@ -127,11 +113,9 @@ data class MiscSettings(
      *  the audio session so external equalizer apps / OEM Dolby can process
      *  playback. Bypass routes (USB exclusive, bit-perfect) suspend it. */
     val systemEffectsMode: Boolean = false,
-    /** Lyrics UI layout version (Classic or Modern). */
-    val lyricsUiVersion: LyricsUiVersion = LyricsUiVersion.MODERN,
+    /** When true, shows synced music video option in the Now Playing menu (Settings -> Experimental). Off by default. */
+    val musicVideoEnabled: Boolean = false,
     val wordByWordLyrics: Boolean = true,
-    /** Experimental lyrics animation style (Settings -> Experimental -> Lyrics Animation). */
-    val lyricsAnimation: LyricsAnimation = LyricsAnimation.APPLE_FLUID,
     /** Preferred lyrics source (Settings -> Experimental -> Lyrics Provider).
      *  AUTO races all providers (fastest valid word-sync wins); an explicit
      *  pick is tried first with the rest as fallback. */
@@ -147,9 +131,19 @@ data class MiscSettings(
     /** When true (default), uses the multi-layer dynamic wavy seekbar.
      *  When false, uses the classic standard progress slider in the player tab. */
     val wavySeekbarEnabled: Boolean = true,
-    /** When true (default), animates fluid rotating artwork in the player and lyrics background.
-     *  When false, uses a calm static blurred artwork background (especially recommended for Android 11 and below). */
     val rotatingBackgroundEnabled: Boolean = true,
+    /** When true (default), animates fluid rotating artwork in the lyrics background.
+     *  When false, uses static blurred artwork background in the lyrics view. */
+    val lyricsRotatingBackgroundEnabled: Boolean = true,
+    /** When true, keeps the screen from turning off when the user has the lyrics view open. */
+    val keepLyricsScreenAwake: Boolean = false,
+    /** Seconds of inactivity before the floating lyrics buttons (font size,
+     *  fullscreen) fade out on the Lyrics screen; 0 = Never. Default 5. */
+    val lyricsButtonsAutoHideSeconds: Int = 5,
+    /** Language the lyric translate button turns songs into, spelled as the
+     *  translation service expects ("fr", "ja", "zh-TW"…). Blank = follow the
+     *  app language. */
+    val translationLanguage: String = "",
     /** When true (default), downloads fetch and save synced lyrics (.lrc companion files and embedded tags). */
     val downloadLyrics: Boolean = true,
     /** Stable ids for the last sort selected on each Downloads tab. */
@@ -189,6 +183,16 @@ data class MiscSettings(
     val canvasFullBleed: Boolean = true,
     /** When true, canvas video loops may be fetched over cellular data. */
     val canvasOverCellular: Boolean = true,
+    /** When true, anonymous listening telemetry connects to the LastWave Live Global Map. */
+    val liveTelemetryEnabled: Boolean = true,
+    /** When true, a liked song is also marked as liked on YouTube Music. */
+    val likedSongsYouTubeSync: Boolean = true,
+    /** When true, a liked song is added to this app's own Liked Songs playlist. */
+    val likedSongsLocalSync: Boolean = true,
+    /** When false, podcast shelves, screens and episode search stay hidden.
+     *  Existing progress is preserved so re-enabling resumes where you left off. */
+    val podcastsEnabled: Boolean = true,
+    val suppressYouTubeLoginPrompt: Boolean = false,
 )
 
 /** Toggleable sections of the Home tab (see FeedScreen). Hero greeting and
@@ -249,6 +253,14 @@ fun sanitizeDownloadFolderName(raw: String?): String {
     return name
 }
 
+/** Clamps the lyrics-buttons auto-hide delay: 0 keeps "Never", everything
+ *  else is forced into the offered 2..10 second range, null = 5 s default. */
+fun sanitizeLyricsButtonsAutoHideSeconds(raw: Int?): Int = when {
+    raw == null -> 5
+    raw == 0 -> 0
+    else -> raw.coerceIn(2, 10)
+}
+
 /** Small dedicated prefs object for settings that don't fit ThemePreferences
  *  or SessionPreferences semantically — shares the app's single DataStore. */
 @Singleton
@@ -268,9 +280,7 @@ class SettingsPreferences @Inject constructor(
         val CLARITY_PRESET = intPreferencesKey("lw_clarity_preset")
         val CLARITY_ATMOS_BYPASS = booleanPreferencesKey("lw_clarity_atmos_bypass")
         val BIT_PERFECT_ENABLED = booleanPreferencesKey("lw_bit_perfect_enabled")
-        val LYRICS_UI_VERSION = stringPreferencesKey("lw_lyrics_ui_version")
         val WORD_BY_WORD_LYRICS = booleanPreferencesKey("lw_word_by_word_lyrics")
-        val LYRICS_ANIMATION = stringPreferencesKey("lw_lyrics_animation")
         val LYRICS_PROVIDER = stringPreferencesKey("lw_lyrics_provider")
         val LYRICS_OFFSET_MS = longPreferencesKey("lw_lyrics_offset_ms")
         val LYRICS_FONT_SCALE = floatPreferencesKey("lw_lyrics_font_scale")
@@ -278,6 +288,10 @@ class SettingsPreferences @Inject constructor(
         val CROSSFADE_SECONDS = intPreferencesKey("lw_crossfade_seconds")
         val WAVY_SEEKBAR_ENABLED = booleanPreferencesKey("lw_wavy_seekbar_enabled")
         val ROTATING_BACKGROUND_ENABLED = booleanPreferencesKey("lw_rotating_background_enabled")
+        val LYRICS_ROTATING_BACKGROUND_ENABLED = booleanPreferencesKey("lw_lyrics_rotating_background_enabled")
+        val KEEP_LYRICS_SCREEN_AWAKE = booleanPreferencesKey("lw_keep_lyrics_screen_awake")
+        val LYRICS_BUTTONS_AUTO_HIDE_SECONDS = intPreferencesKey("lw_lyrics_buttons_auto_hide_seconds")
+        val TRANSLATION_LANGUAGE = stringPreferencesKey("lw_translation_language")
         val DOWNLOAD_LYRICS = booleanPreferencesKey("lw_download_lyrics")
         val DOWNLOAD_SONG_SORT = stringPreferencesKey("lw_download_song_sort")
         val DOWNLOAD_ARTIST_SORT = stringPreferencesKey("lw_download_artist_sort")
@@ -287,6 +301,7 @@ class SettingsPreferences @Inject constructor(
         val DOWNLOAD_TREE_URI = stringPreferencesKey("lw_download_tree_uri")
         val DOWNLOAD_STRUCTURE = stringPreferencesKey("lw_download_structure")
         val SYSTEM_EFFECTS_MODE = booleanPreferencesKey("lw_system_effects_mode")
+        val MUSIC_VIDEO_ENABLED = booleanPreferencesKey("lw_music_video_enabled")
         val USE_ALBUM_ARTIST_FOLDERS = booleanPreferencesKey("lw_use_album_artist_folders")
         val PRIMARY_ARTIST_ONLY = booleanPreferencesKey("lw_primary_artist_only")
         val HIDDEN_HOME_SECTIONS = stringSetPreferencesKey("lw_hidden_home_sections")
@@ -297,6 +312,12 @@ class SettingsPreferences @Inject constructor(
         val CANVAS_ENABLED = booleanPreferencesKey("lw_canvas_enabled")
         val CANVAS_FULL_BLEED = booleanPreferencesKey("lw_canvas_full_bleed")
         val CANVAS_OVER_CELLULAR = booleanPreferencesKey("lw_canvas_over_cellular")
+        val LIVE_TELEMETRY_ENABLED = booleanPreferencesKey("lw_live_telemetry_enabled")
+        val LIKED_SONGS_YOUTUBE_SYNC = booleanPreferencesKey("lw_liked_songs_youtube_sync")
+        val LIKED_SONGS_LOCAL_SYNC = booleanPreferencesKey("lw_liked_songs_local_sync")
+        val LIKED_SONGS_LOCAL_ONLY = stringPreferencesKey("lw_liked_songs_local_only")
+        val PODCASTS_ENABLED = booleanPreferencesKey("lw_podcasts_enabled")
+        val SUPPRESS_YOUTUBE_LOGIN_PROMPT = booleanPreferencesKey("lw_suppress_youtube_login_prompt")
     }
 
     val settings: Flow<MiscSettings> = dataStore.data
@@ -336,13 +357,12 @@ class SettingsPreferences @Inject constructor(
                 losslessQuality = p.readSafely(Keys.LOSSLESS_QUALITY)?.takeIf { it in LOSSLESS_QUALITIES } ?: 27,
                 downloadQuality = p.readSafely(Keys.DOWNLOAD_QUALITY)?.takeIf { it in DOWNLOAD_QUALITIES } ?: 27,
                 systemEffectsMode = p.readSafely(Keys.SYSTEM_EFFECTS_MODE) ?: false,
+                musicVideoEnabled = p.readSafely(Keys.MUSIC_VIDEO_ENABLED) ?: false,
                 isStudioMasterClarityEnabled = p.readSafely(Keys.MUSIC_ENHANCER) ?: true,
                 clarityPreset = p.readSafely(Keys.CLARITY_PRESET)?.takeIf { it in 0..3 } ?: 0,
                 clarityAtmosBypass = p.readSafely(Keys.CLARITY_ATMOS_BYPASS) ?: false,
                 isBitPerfectEnabled = p.readSafely(Keys.BIT_PERFECT_ENABLED) ?: false,
-                lyricsUiVersion = LyricsUiVersion.fromId(p.readSafely(Keys.LYRICS_UI_VERSION)),
                 wordByWordLyrics = p.readSafely(Keys.WORD_BY_WORD_LYRICS) ?: true,
-                lyricsAnimation = LyricsAnimation.fromId(p.readSafely(Keys.LYRICS_ANIMATION)),
                 lyricsProvider = LyricsProvider.fromId(p.readSafely(Keys.LYRICS_PROVIDER)),
                 lyricsOffsetMs = (p.readSafely(Keys.LYRICS_OFFSET_MS) ?: 0L).coerceIn(-10000L, 10000L),
                 lyricsFontScale = (p.readSafely(Keys.LYRICS_FONT_SCALE) ?: 1.0f).coerceIn(0.7f, 1.5f),
@@ -350,6 +370,11 @@ class SettingsPreferences @Inject constructor(
                 crossfadeSeconds = (p.readSafely(Keys.CROSSFADE_SECONDS) ?: 5).coerceIn(1, 12),
                 wavySeekbarEnabled = p.readSafely(Keys.WAVY_SEEKBAR_ENABLED) ?: true,
                 rotatingBackgroundEnabled = p.readSafely(Keys.ROTATING_BACKGROUND_ENABLED) ?: true,
+                lyricsRotatingBackgroundEnabled = p.readSafely(Keys.LYRICS_ROTATING_BACKGROUND_ENABLED) ?: true,
+                keepLyricsScreenAwake = p.readSafely(Keys.KEEP_LYRICS_SCREEN_AWAKE) ?: false,
+                lyricsButtonsAutoHideSeconds =
+                    sanitizeLyricsButtonsAutoHideSeconds(p.readSafely(Keys.LYRICS_BUTTONS_AUTO_HIDE_SECONDS)),
+                translationLanguage = p.readSafely(Keys.TRANSLATION_LANGUAGE)?.trim().orEmpty(),
                 downloadLyrics = p.readSafely(Keys.DOWNLOAD_LYRICS) ?: true,
                 downloadSongSort = p.readSafely(Keys.DOWNLOAD_SONG_SORT) ?: "recent",
                 downloadArtistSort = p.readSafely(Keys.DOWNLOAD_ARTIST_SORT) ?: "name_az",
@@ -370,6 +395,11 @@ class SettingsPreferences @Inject constructor(
                 canvasEnabled = p.readSafely(Keys.CANVAS_ENABLED) ?: true,
                 canvasFullBleed = p.readSafely(Keys.CANVAS_FULL_BLEED) ?: true,
                 canvasOverCellular = p.readSafely(Keys.CANVAS_OVER_CELLULAR) ?: true,
+                liveTelemetryEnabled = p.readSafely(Keys.LIVE_TELEMETRY_ENABLED) ?: true,
+                likedSongsYouTubeSync = p.readSafely(Keys.LIKED_SONGS_YOUTUBE_SYNC) ?: true,
+                likedSongsLocalSync = p.readSafely(Keys.LIKED_SONGS_LOCAL_SYNC) ?: true,
+                podcastsEnabled = p.readSafely(Keys.PODCASTS_ENABLED) ?: true,
+                suppressYouTubeLoginPrompt = p.readSafely(Keys.SUPPRESS_YOUTUBE_LOGIN_PROMPT) ?: false,
             )
         }
 
@@ -527,6 +557,14 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.USE_CUSTOM_FONT] = enabled }
     }
 
+    suspend fun setPodcastsEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.PODCASTS_ENABLED] = enabled }
+    }
+
+    suspend fun setSuppressYouTubeLoginPrompt(suppress: Boolean) {
+        dataStore.edit { it[Keys.SUPPRESS_YOUTUBE_LOGIN_PROMPT] = suppress }
+    }
+
     suspend fun setPreferLosslessStreaming(enabled: Boolean) {
         dataStore.edit {
             it[Keys.PREFER_LOSSLESS_STREAMING] = enabled
@@ -557,6 +595,10 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.SYSTEM_EFFECTS_MODE] = enabled }
     }
 
+    suspend fun setMusicVideoEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.MUSIC_VIDEO_ENABLED] = enabled }
+    }
+
     suspend fun setStudioMasterClarity(enabled: Boolean) {
         dataStore.edit { it[Keys.MUSIC_ENHANCER] = enabled }
     }
@@ -569,20 +611,12 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.CLARITY_ATMOS_BYPASS] = enabled }
     }
 
-    suspend fun setLyricsUiVersion(version: LyricsUiVersion) {
-        dataStore.edit { it[Keys.LYRICS_UI_VERSION] = version.id }
-    }
-
     suspend fun setBitPerfectEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.BIT_PERFECT_ENABLED] = enabled }
     }
 
     suspend fun setWordByWordLyrics(enabled: Boolean) {
         dataStore.edit { it[Keys.WORD_BY_WORD_LYRICS] = enabled }
-    }
-
-    suspend fun setLyricsAnimation(animation: LyricsAnimation) {
-        dataStore.edit { it[Keys.LYRICS_ANIMATION] = animation.id }
     }
 
     suspend fun setLyricsProvider(provider: LyricsProvider) {
@@ -611,6 +645,24 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun setRotatingBackgroundEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.ROTATING_BACKGROUND_ENABLED] = enabled }
+    }
+
+    suspend fun setLyricsRotatingBackgroundEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.LYRICS_ROTATING_BACKGROUND_ENABLED] = enabled }
+    }
+
+    suspend fun setKeepLyricsScreenAwake(enabled: Boolean) {
+        dataStore.edit { it[Keys.KEEP_LYRICS_SCREEN_AWAKE] = enabled }
+    }
+
+    suspend fun setLyricsButtonsAutoHideSeconds(seconds: Int) {
+        dataStore.edit {
+            it[Keys.LYRICS_BUTTONS_AUTO_HIDE_SECONDS] = sanitizeLyricsButtonsAutoHideSeconds(seconds)
+        }
+    }
+
+    suspend fun setTranslationLanguage(language: String) {
+        dataStore.edit { it[Keys.TRANSLATION_LANGUAGE] = language.trim() }
     }
 
     suspend fun setDownloadLyrics(enabled: Boolean) {
@@ -706,6 +758,37 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun setCanvasOverCellular(enabled: Boolean) {
         dataStore.edit { it[Keys.CANVAS_OVER_CELLULAR] = enabled }
+    }
+
+    suspend fun setLiveTelemetryEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.LIVE_TELEMETRY_ENABLED] = enabled }
+    }
+
+    /** Whether a liked song is added to this app's own Liked Songs playlist. */
+    val likedSongsLocalSync: Flow<Boolean> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { it.readSafely(Keys.LIKED_SONGS_LOCAL_SYNC) ?: true }
+
+    /** Whether a liked song is also marked as liked on YouTube Music. */
+    val likedSongsYouTubeSync: Flow<Boolean> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { it.readSafely(Keys.LIKED_SONGS_YOUTUBE_SYNC) ?: true }
+
+    suspend fun setLikedSongsYouTubeSync(enabled: Boolean) {
+        dataStore.edit { it[Keys.LIKED_SONGS_YOUTUBE_SYNC] = enabled }
+    }
+
+    suspend fun setLikedSongsLocalSync(enabled: Boolean) {
+        dataStore.edit { it[Keys.LIKED_SONGS_LOCAL_SYNC] = enabled }
+    }
+
+    /** The likes kept while the local Liked Songs playlist was switched off, as stored tracks. */
+    val localOnlyLikedTracks: Flow<String> = dataStore.data
+        .recoverPreferences("SettingsPreferences")
+        .map { it.readSafely(Keys.LIKED_SONGS_LOCAL_ONLY).orEmpty() }
+
+    suspend fun setLocalOnlyLikedTracks(value: String) {
+        dataStore.edit { it[Keys.LIKED_SONGS_LOCAL_ONLY] = value }
     }
 
     private companion object {

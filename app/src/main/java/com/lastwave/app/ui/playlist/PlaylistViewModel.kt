@@ -184,7 +184,10 @@ class PlaylistViewModel @Inject constructor(
                 emptyList()
             }
             val remote = runCatching { ytMusicLibraryManager.playlists.value }.getOrDefault(emptyList())
-            val all = sortPlaylists(local + remote, _uiState.value.sortMode)
+            val dedupedRemote = remote.filterNot { r ->
+                local.any { l -> (l.remotePlaylistId != null && l.remotePlaylistId == r.remotePlaylistId) || (l.title.equals(r.title, ignoreCase = true) && l.mode == "custom") }
+            }
+            val all = sortPlaylists(local + dedupedRemote, _uiState.value.sortMode).distinctBy { it.id }
             val newest = justGeneratedId ?: all.maxByOrNull { it.createdAtMillis }?.id
             _uiState.update { current ->
                 val currentDetailId = current.detailPlaylist?.id
@@ -232,7 +235,7 @@ class PlaylistViewModel @Inject constructor(
                 ytMusicLibraryManager.loadDetail(playlistId) { updated ->
                     _uiState.update { current ->
                         current.copy(
-                            isDetailLoading = updated.tracks.isEmpty(),
+                            isDetailLoading = false,
                             detailPlaylist = updated,
                             playlists = current.playlists.map { existing ->
                                 if (existing.id == updated.id) updated else existing

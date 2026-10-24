@@ -37,7 +37,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import com.lastwave.app.R
 import androidx.compose.ui.unit.dp
 import com.lastwave.app.ui.common.adaptiveContentWidth
 import com.lastwave.app.ui.theme.ExpressivePillShape
@@ -111,9 +113,9 @@ fun LoginScreen(
                         )
                     }
                 }
-                Text("LastWave", style = MaterialTheme.typography.headlineMedium)
+                Text(stringResource(R.string.set_about_title), style = MaterialTheme.typography.headlineMedium)
                 Text(
-                    "Your music, your way — powered by YouTube Music",
+                    stringResource(R.string.login_tagline),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -140,7 +142,7 @@ fun LoginScreen(
                         contentDescription = null,
                         modifier = Modifier.padding(end = 8.dp),
                     )
-                    Text("Login with YouTube Music")
+                    Text(stringResource(R.string.login_yt))
                 }
                 Spacer(Modifier.height(12.dp))
 
@@ -156,12 +158,11 @@ fun LoginScreen(
                         contentDescription = null,
                         modifier = Modifier.padding(end = 8.dp),
                     )
-                    Text("Continue as Guest")
+                    Text(stringResource(R.string.login_guest))
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Guest mode works fully offline with local recommendations. " +
-                        "Connect Last.fm anytime in Settings to sync scrobbles.",
+                    stringResource(R.string.login_guest_desc),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -180,7 +181,7 @@ fun LoginScreen(
                             contentDescription = null,
                             modifier = Modifier.padding(end = 8.dp),
                         )
-                        Text("Restore backup")
+                        Text(stringResource(R.string.login_restore))
                     }
                 }
 
@@ -192,7 +193,7 @@ fun LoginScreen(
                             contentDescription = null,
                             modifier = Modifier.padding(end = 6.dp),
                         )
-                        Text("Open Offline Downloads")
+                        Text(stringResource(R.string.login_downloads))
                     }
                 }
 
@@ -205,7 +206,7 @@ fun LoginScreen(
                         TextButton(onClick = {
                             restoreReadError = null
                             onDismissError()
-                        }) { Text("Dismiss") }
+                        }) { Text(stringResource(R.string.gen_dismiss)) }
                     }
                 }
             }
