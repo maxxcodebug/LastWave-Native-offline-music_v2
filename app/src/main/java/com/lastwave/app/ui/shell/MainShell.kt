@@ -777,63 +777,7 @@ private fun FloatingNavBar(
                 modifier = Modifier.liquidGlassChrome(DockShape, liquidGlass, LiquidGlassPreset.BottomNavigation, backdrop, interactionSource = dockInteraction),
             ) {
                 Row(
-                    modifier = Modifier
-
-                        .then(
-                            if (liquidGlass) {
-                                Modifier.pointerInput(Unit) {
-                                    val bridge = 6.dp.toPx()
-                                    val hitIndex: (Offset) -> Int? = { pos ->
-                                        glassNavBounds.entries
-                                            .firstOrNull { it.value.inflate(bridge).contains(pos) }
-                                            ?.key
-                                    }
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed = false)
-                                        val startIndex = hitIndex(down.position)
-                                        var lastIndex = startIndex
-                                        glassHoverIndex.value = startIndex
-                                        while (true) {
-                                            val event = awaitPointerEvent()
-                                            val change = event.changes.firstOrNull { it.id == down.id }
-                                            if (change == null || !change.pressed) {
-                                                glassHoverIndex.value = null
-                                                // Slide across the pill and lift: open the tab under the finger.
-                                                val target = lastIndex
-                                                if (target != null && target != startIndex) onSelectState.value(target)
-                                                break
-                                            }
-                                            val here = hitIndex(change.position)
-                                            if (here != null) lastIndex = here
-                                            glassHoverIndex.value = here
-                                        }
-
-                        .pointerInput(tabs, selectedIndex) {
-                            val bridge = 8.dp.toPx()
-                            val hitIndex: (Offset) -> Int? = { pos ->
-                                glassNavBounds.entries
-                                    .firstOrNull { it.value.inflate(bridge).contains(pos) }
-                                    ?.key
-                            }
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val initialHit = hitIndex(down.position)
-                                if (initialHit != null && initialHit != selectedIndex) {
-                                    onSelect(initialHit)
-                                }
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id }
-                                    if (change == null || !change.pressed) break
-                                    val currentHit = hitIndex(change.position)
-                                    if (currentHit != null && currentHit != selectedIndex) {
-                                        onSelect(currentHit)
-
-                                    }
-                                }
-                            }
-                        }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(if (tabs.size > 4) 2.dp else 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -844,7 +788,9 @@ private fun FloatingNavBar(
                             icon = tab.icon(),
                             selected = selectedIndex == index,
                             onClick = onClick,
-
+                            modifier = Modifier.onGloballyPositioned { coords ->
+                                glassNavBounds[index] = coords.boundsInParent()
+                            },
                             compact = tabs.size > 4,
                         )
                     }
@@ -897,13 +843,6 @@ private fun FloatingNavBar(
                 }
             }
 
-                            modifier = Modifier.onGloballyPositioned { coords ->
-                                glassNavBounds[index] = coords.boundsInParent()
-                            },
-                        )
-                    }
-                }
-            }
 
         }
     }
@@ -926,16 +865,12 @@ private fun FloatingNavItem(
             alpha = if (LocalLiquidGlass.current) 0.28f else 1f,
         ) else Color.Transparent,
 
-        animationSpec = MaxxSpring.settle(),
-
         animationSpec = ExpressiveMotion.effectsDefault(),
 
         label = "navItemBackground",
     )
     val contentColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-
-        animationSpec = MaxxSpring.settle(),
 
         animationSpec = ExpressiveMotion.effectsDefault(),
 
@@ -964,9 +899,7 @@ private fun FloatingNavItem(
         shape = PillShape,
         color = backgroundColor,
 
-        modifier = Modifier.maxxPress(itemInteraction, 0.9f).height(48.dp),
-
-        modifier = modifier.height(48.dp),
+        modifier = modifier.maxxPress(itemInteraction, 0.9f).height(48.dp),
 
     ) {
         Row(
