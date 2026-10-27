@@ -18,6 +18,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
@@ -512,6 +513,18 @@ fun SettingsScreen(
     val internalDirectAvailability by viewModel.internalDirectAvailability.collectAsStateWithLifecycle()
     val loudness by viewModel.loudness.collectAsStateWithLifecycle()
     val updateInfo by viewModel.updateInfo.collectAsStateWithLifecycle()
+    var updateChannel by rememberSaveable { mutableStateOf(viewModel.getUpdateChannel()) }
+    var showBetaWarning by rememberSaveable { mutableStateOf(false) }
+    var betaCountdown by rememberSaveable { mutableStateOf(5) }
+    LaunchedEffect(showBetaWarning) {
+        if (showBetaWarning) {
+            betaCountdown = 5
+            while (betaCountdown > 0) {
+                delay(1000L)
+                betaCountdown -= 1
+            }
+        }
+    }
     val discordPresenceEnabled by viewModel.discordPresenceEnabled.collectAsStateWithLifecycle()
     val isLastFmConnected by viewModel.isLastFmConnected.collectAsStateWithLifecycle()
     val hasApiKey by viewModel.hasApiKey.collectAsStateWithLifecycle()
@@ -842,11 +855,24 @@ fun SettingsScreen(
                         }
 
                         item {
+                            var showMaxxDialog by remember { mutableStateOf(false) }
+                            if (showMaxxDialog) {
+                                com.lastwave.app.ui.settings.MaxxContributionsDialog(onDismiss = { showMaxxDialog = false })
+                            }
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 SectionLabel("System & About")
-                                SettingsGroup(rowCount = 2) { index, position ->
+                                SettingsGroup(rowCount = 3) { index, position ->
                                     when (index) {
                                         0 -> SettingsActionCard(
+                                            icon = Icons.Filled.Favorite,
+                                            iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                            iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            title = "Maxx Contributions",
+                                            subtitle = "Offline player, MaxxEqualizer Lite, credits & links",
+                                            onClick = { showMaxxDialog = true },
+                                            position = position,
+                                        )
+                                        1 -> SettingsActionCard(
                                             icon = Icons.Filled.Backup,
                                             iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
                                             iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -2353,6 +2379,52 @@ fun SettingsScreen(
                         },
                         isHighlighted = (highlightedSettingId == "about.check_updates"),
                     )
+
+                    SettingsActionCard(
+                        icon = Icons.Filled.Info,
+                        iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                        iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        title = "Update Channel",
+                        subtitle = if (updateChannel == "beta") "LastWave Beta Channel by Anshuman X" else "Stable • Recommended",
+                        onClick = { showBetaWarning = true },
+                        isHighlighted = false,
+                    )
+                    SettingsActionCard(
+                        icon = Icons.Filled.Check,
+                        iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                        iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        title = "Use Stable Channel",
+                        subtitle = "Recommended for everyday use",
+                        onClick = {
+                            updateChannel = "stable"
+                            viewModel.setUpdateChannel("stable")
+                        },
+                        isHighlighted = false,
+                    )
+                    if (showBetaWarning) {
+                        AlertDialog(
+                            onDismissRequest = { showBetaWarning = false },
+                            icon = { Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                            title = { Text("LastWave Beta Channel Warning") },
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text("LastWave Beta Channel by Anshuman X")
+                                    Text("Beta builds are early testing versions and may contain bugs, crashes, unfinished features, performance problems, or issues that affect app data. They are not as thoroughly tested as Stable releases.")
+                                    Text("Back up important data before installing. Features may change or be removed. Returning to Stable may require manually installing a Stable APK, and downgrading can fail if version or data requirements differ.")
+                                    Text("Continue only if you understand these risks and are comfortable testing potentially unstable software.")
+                                    Text(if (betaCountdown > 0) "Please wait $betaCountdown seconds…" else "You can now continue.")
+                                }
+                            },
+                            confirmButton = {
+                                Button(enabled = betaCountdown == 0, onClick = {
+                                    updateChannel = "beta"
+                                    viewModel.setUpdateChannel("beta")
+                                    showBetaWarning = false
+                                }) { Text("Continue to Beta") }
+                            },
+                            dismissButton = { TextButton(onClick = { showBetaWarning = false }) { Text("Cancel") } },
+                        )
+                    }
 
                     SettingsActionCard(
                         icon = Icons.Filled.Code,

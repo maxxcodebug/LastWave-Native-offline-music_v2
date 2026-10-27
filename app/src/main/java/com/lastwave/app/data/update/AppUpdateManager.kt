@@ -86,6 +86,15 @@ class AppUpdateManager @Inject constructor(
         checkForUpdate(isSilent = true)
     }
 
+    fun getUpdateChannel(): String =
+        prefs.getString("update_channel", "stable") ?: "stable"
+
+    fun setUpdateChannel(channel: String) {
+        val selected = if (channel.equals("beta", ignoreCase = true)) "beta" else "stable"
+        prefs.edit().putString("update_channel", selected).remove("dismissed_version").apply()
+        checkForUpdate(isSilent = false)
+    }
+
     fun getCurrentVersion(): String = try {
         context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "4.3.1"
     } catch (_: Exception) {
@@ -101,9 +110,16 @@ class AppUpdateManager @Inject constructor(
                 )
             }
             try {
+                val ownerRepo = "maxxcodebug/LastWave-Native-offline-music_v2"
+                val channel = getUpdateChannel()
+                val apiUrl = if (channel == "beta") {
+                    "https://api.github.com/repos/$ownerRepo/releases?per_page=30"
+                } else {
+                    "https://api.github.com/repos/$ownerRepo/releases/latest"
+                }
                 val request = Request.Builder()
-                    .url("https://api.github.com/repos/Clash-Projects/LastWave-native/releases/latest")
-                    .header("Accept", "application/vnd.github.v3+json")
+                    .url(apiUrl)
+                    .header("Accept", "application/vnd.github+json")
                     .header("User-Agent", "LastWave-Android")
                     .build()
 
@@ -123,9 +139,25 @@ class AppUpdateManager @Inject constructor(
                 }
 
                 val body = response.body?.string().orEmpty()
-                val json = JSONObject(body)
+                val json = if (channel == "beta") {
+                    val releases = org.json.JSONArray(body)
+                    (0 until releases.length())
+                        .mapNotNull { releases.optJSONObject(it) }
+                        .firstOrNull { it.optBoolean("prerelease", false) && !it.optBoolean("draft", false) }
+                } else {
+                    JSONObject(body).takeUnless {
+                        it.optBoolean("prerelease", false) || it.optBoolean("draft", false)
+                    }
+                }
+                if (json == null) {
+                    _updateInfo.update {
+                        it.copy(isChecking = false, isUpdateAvailable = false,
+                            message = if (!isSilent) "No ${channel} release is available yet." else null)
+                    }
+                    return@launch
+                }
                 val tagName = json.optString("tag_name", "")
-                val releaseUrl = json.optString("html_url", "https://github.com/Clash-Projects/LastWave-native/releases")
+                val releaseUrl = json.optString("html_url", "https://github.com/$ownerRepo/releases")
                 val releaseNotes = json.optString("body", "")
 
                 val apkAssets = mutableListOf<ReleaseAsset>()
@@ -190,7 +222,7 @@ class AppUpdateManager @Inject constructor(
 
     fun openUpdate(context: Context) {
         val targetUrl = _updateInfo.value.downloadUrl ?: _updateInfo.value.releaseUrl.ifBlank {
-            "https://github.com/Clash-Projects/LastWave-native/releases"
+            "https://github.com/maxxcodebug/LastWave-Native-offline-music_v2/releases"
         }
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
