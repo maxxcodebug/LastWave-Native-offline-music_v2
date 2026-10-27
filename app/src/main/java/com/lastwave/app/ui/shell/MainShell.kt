@@ -166,16 +166,12 @@ import javax.inject.Inject
 @HiltViewModel
 class MainShellViewModel @Inject constructor(
     val appUpdateManager: com.lastwave.app.data.update.AppUpdateManager,
-
     offlinePreferences: com.lastwave.app.data.offline.OfflinePreferences,
-) : ViewModel() {
-    val updateInfo = appUpdateManager.updateInfo
-    val offlineMode = offlinePreferences.offlineMode
-
     val ytAuthManager: com.lastwave.app.data.ytmusic.YtMusicAuthManager,
     val settingsPreferences: com.lastwave.app.data.local.SettingsPreferences,
 ) : ViewModel() {
     val updateInfo = appUpdateManager.updateInfo
+    val offlineMode = offlinePreferences.offlineMode
     val ytConnection = ytAuthManager.connection
     val settings = settingsPreferences.settings
 
