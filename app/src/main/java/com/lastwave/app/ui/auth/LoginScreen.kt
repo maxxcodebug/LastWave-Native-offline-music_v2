@@ -66,9 +66,11 @@ fun LoginScreen(
     errorMessage: String? = null,
     isBusy: Boolean = false,
     onOpenDownloads: (() -> Unit)? = null,
+    onContinueOffline: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var restoreReadError by remember { mutableStateOf<String?>(null) }
+    var offlineSelected by remember { mutableStateOf(false) }
     val restoreBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -118,12 +120,20 @@ fun LoginScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.height(if (onContinueOffline != null) 20.dp else 32.dp))
+                if (onContinueOffline != null) {
+                    com.lastwave.app.ui.offline.OfflineModeSetupCard(
+                        checked = offlineSelected,
+                        onCheckedChange = { offlineSelected = it },
+                        onContinue = onContinueOffline,
+                    )
+                    Spacer(Modifier.height(20.dp))
+                }
 
                 // 1. Primary: YouTube Music login.
                 Button(
                     onClick = onLoginWithYouTube,
-                    enabled = !isBusy,
+                    enabled = !isBusy && !offlineSelected,
                     shape = ExpressivePillShape,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                 ) {
@@ -139,7 +149,7 @@ fun LoginScreen(
                 // 2. Primary: Guest mode (account-free, local-first).
                 OutlinedButton(
                     onClick = onContinueAsGuest,
-                    enabled = !isBusy,
+                    enabled = !isBusy && !offlineSelected,
                     shape = ExpressivePillShape,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                 ) {
@@ -162,7 +172,7 @@ fun LoginScreen(
                     Spacer(Modifier.height(16.dp))
                     OutlinedButton(
                         onClick = { restoreBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
-                        enabled = !isBusy,
+                        enabled = !isBusy && !offlineSelected,
                         shape = ExpressivePillShape,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                     ) {

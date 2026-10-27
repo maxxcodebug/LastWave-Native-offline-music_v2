@@ -114,6 +114,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -6134,6 +6135,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                         Modifier.fillMaxWidth().padding(9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+
                         Text(
                             "${index + 1}",
                             style = MaterialTheme.typography.labelSmall,
@@ -6171,6 +6173,104 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+
+
+                        val indexState = androidx.compose.runtime.rememberUpdatedState(index)
+
+                        Icon(
+                            Icons.Filled.DragHandle,
+                            stringResource(com.lastwave.app.R.string.queue_drag_hint),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isDragging) 1f else 0.6f),
+                            modifier = Modifier
+                                .padding(end = 6.dp)
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f),
+                                )
+                                .pointerInput(stableKey) {
+                                    detectDragGestures(
+                                        onDragStart = {
+                                            draggingIndex = indexState.value
+                                            dragOffsetY = 0f
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        },
+                                        onDragEnd = {
+                                            draggingIndex = -1
+                                            dragOffsetY = 0f
+                                        },
+                                        onDragCancel = {
+                                            draggingIndex = -1
+                                            dragOffsetY = 0f
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            val source = draggingIndex
+                                            if (source < 0) return@detectDragGestures
+                                            dragOffsetY += dragAmount.y
+                                            val layoutInfo = listState.layoutInfo
+                                            val draggedInfo = layoutInfo.visibleItemsInfo
+                                                .firstOrNull { it.index == source }
+                                                ?: return@detectDragGestures
+                                            val draggedCenter = draggedInfo.offset + draggedInfo.size / 2 + dragOffsetY.toInt()
+                                            val target = layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                                info.index != source &&
+                                                    info.index in state.queue.indices &&
+                                                    draggedCenter in info.offset..(info.offset + info.size)
+                                            }?.index
+                                            if (target != null && target != source) {
+                                                player.moveQueueItem(source, target)
+                                                // Keep the row glued under the finger across
+                                                // the layout shift caused by the move.
+                                                val targetInfo = layoutInfo.visibleItemsInfo
+                                                    .firstOrNull { it.index == target }
+                                                if (targetInfo != null) {
+                                                    dragOffsetY += (draggedInfo.offset - targetInfo.offset).toFloat()
+                                                }
+                                                draggingIndex = target
+                                                haptics.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+                                            }
+                                            // Edge auto-scroll while dragging.
+                                            val viewportStart = layoutInfo.viewportStartOffset
+                                            val viewportEnd = layoutInfo.viewportEndOffset
+                                            val edgeZone = 180
+                                            when {
+                                                draggedCenter < viewportStart + edgeZone ->
+                                                    scope.launch { listState.scrollBy(-28f) }
+                                                draggedCenter > viewportEnd - edgeZone ->
+                                                    scope.launch { listState.scrollBy(28f) }
+                                            }
+                                        },
+                                    )
+                                }
+                                .padding(8.dp),
+                        )
+                        PlayerArtwork(item, Modifier.size(50.dp), 13.dp)
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                            Text(
+                                item.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
+                            )
+                            Text(
+                                item.artist,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f)
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (isCurrent) {
+                            Icon(
+                                Icons.Filled.GraphicEq,
+                                "Currently playing",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp),
+
                         if (!isQueueLocked) {
                             Icon(
                                 Icons.Filled.DragHandle,
@@ -6241,6 +6341,7 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                                             },
                                         )
                                     },
+
                             )
                         }
                     }

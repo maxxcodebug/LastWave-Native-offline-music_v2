@@ -116,6 +116,8 @@ class SettingsViewModel @Inject constructor(
     val authState: StateFlow<com.lastwave.app.data.model.AuthState> = authRepository.authState
     val updateInfo = appUpdateManager.updateInfo
 
+    fun getUpdateChannel(): String = appUpdateManager.getUpdateChannel()
+    fun setUpdateChannel(channel: String) = appUpdateManager.setUpdateChannel(channel)
     fun checkForUpdates() = appUpdateManager.checkForUpdate(isSilent = false)
     fun openUpdate(context: android.content.Context) = appUpdateManager.openUpdate(context)
 

@@ -38,6 +38,11 @@ data class ThemePrefs(
     val accentLight: String = "#FF6060",
     val accentMode: AccentMode = AccentMode.MANUAL,
     val amoled: Boolean = false,
+
+    /** Experimental iOS-style liquid-glass materials. Off by default — the
+     *  classic opaque look stays untouched until the user opts in. */
+    val liquidGlass: Boolean = true,
+
     /** iOS-style liquid-glass materials. Enabled by default. */
     val liquidGlass: Boolean = true,
     /** Optional Material 3 full-width navigation bar instead of the default floating dock. */
@@ -46,6 +51,7 @@ data class ThemePrefs(
     val hideNavTabs: Boolean = false,
     /** Dedicated LastWave Signature Theme inspired by the app logo icon (#C9FB00 & #012226). */
     val lastWaveTheme: Boolean = false,
+
 )
 
 @Singleton
@@ -74,9 +80,12 @@ class ThemePreferences @Inject constructor(
                 accentMode = AccentMode.fromStorage(p.readSafely(Keys.ACCENT_MODE)),
                 amoled = p.readSafely(Keys.AMOLED) ?: false,
                 liquidGlass = p.readSafely(Keys.LIQUID_GLASS) ?: true,
+
+
                 md3NavBar = p.readSafely(Keys.MD3_NAV_BAR) ?: false,
                 hideNavTabs = p.readSafely(Keys.HIDE_NAV_TABS) ?: false,
                 lastWaveTheme = p.readSafely(Keys.LASTWAVE_THEME) ?: false,
+
             )
         }
 
