@@ -20,6 +20,7 @@ import com.lastwave.app.data.music.HomeShelfItem
 import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.music.YouTubePlaylistSummary
 import com.lastwave.app.data.podcast.PodcastRepository
+import com.lastwave.app.data.podcast.PodcastShelf
 import com.lastwave.app.data.podcast.PodcastShow
 import com.lastwave.app.data.local.SettingsPreferences
 import com.lastwave.app.data.playlist.PlaylistRepository
@@ -156,12 +157,37 @@ class FeedRepository @Inject constructor(
         val homePageDef = async(Dispatchers.IO) {
             runCatching { innerTube.fetchHomePage() }.getOrDefault(HomePage())
         }
-        // Podcast shelf rides along with the rest of the feed. Disabled in
-        // settings -> the fetch never happens and the shelf stays empty.
+        // Podcast shelf rides along with the rest of the feed. Loaded from
+        // YouTube Music Podcasts chip page 1 ("Shows for you" shelf) with a random sample of ~10 shows.
         val podcastShelfDef = async(Dispatchers.IO) {
             if (!podcastsEnabled) return@async null
-            runCatching { podcastRepository.home() }.getOrNull()
-                ?.firstOrNull { it.shows.isNotEmpty() }
+            runCatching {
+                val homePage = homePageDef.await()
+                val podcastChip = homePage.chips.firstOrNull { it.title.equals("Podcasts", ignoreCase = true) }
+                    ?: HomeChip(title = "Podcasts", params = "ggMPOg1mZWVkX3BvZGNhc3Rz")
+                val chipPage = innerTube.fetchHomeChip(podcastChip)
+                val showsShelf = chipPage.shelves.firstOrNull { shelf ->
+                    shelf.items.any { it is HomeShelfItem.PodcastShow }
+                } ?: chipPage.shelves.firstOrNull()
+
+                val rawShows = showsShelf?.items?.filterIsInstance<HomeShelfItem.PodcastShow>().orEmpty()
+                if (rawShows.isEmpty()) null
+                else {
+                    val sampled = rawShows.shuffled(random).take(10).map { show ->
+                        PodcastShow(
+                            showId = show.browseId,
+                            title = show.title,
+                            publisher = show.author,
+                            artworkUrl = show.artworkUrl,
+                        )
+                    }
+                    val shelfTitle = showsShelf?.title?.takeIf { it.isNotBlank() } ?: "Popular shows"
+                    PodcastShelf(
+                        title = shelfTitle,
+                        shows = sampled,
+                    )
+                }
+            }.getOrNull()
         }
 
         val ytTasteDef = async(Dispatchers.IO) {
@@ -172,12 +198,16 @@ class FeedRepository @Inject constructor(
 
         val recentTracksDef = async(Dispatchers.IO) {
             if (!username.isNullOrBlank()) {
-                homeRepository.fetchRecentTracks(page = 1, limit = 30, username = username).getOrNull()?.tracks.orEmpty()
+                runCatching {
+                    homeRepository.fetchRecentTracks(page = 1, limit = 30, username = username).getOrNull()?.tracks.orEmpty()
+                }.getOrDefault(emptyList())
             } else emptyList()
         }
         val friendsDef = async(Dispatchers.IO) {
             if (!username.isNullOrBlank()) {
-                homeRepository.fetchFriends(limit = 20).getOrNull().orEmpty()
+                runCatching {
+                    homeRepository.fetchFriends(limit = 20).getOrNull().orEmpty()
+                }.getOrDefault(emptyList())
             } else emptyList()
         }
         val tasteProfileDef = async(Dispatchers.IO) {

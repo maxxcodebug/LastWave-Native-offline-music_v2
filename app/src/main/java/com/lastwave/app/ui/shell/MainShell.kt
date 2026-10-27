@@ -48,14 +48,19 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Leaderboard
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -188,6 +193,12 @@ class MainShellViewModel @Inject constructor(
             settingsPreferences.setSuppressYouTubeLoginPrompt(suppress)
         }
     }
+
+    fun setDismissedJoinSupportPrompt(dismissed: Boolean = true) {
+        viewModelScope.launch {
+            settingsPreferences.setDismissedJoinSupportPrompt(dismissed)
+        }
+    }
 }
 
 private enum class MainTab(val labelRes: Int) {
@@ -294,10 +305,11 @@ private fun MainShellContent(
     onOpenPodcasts: () -> Unit = {},
     onOpenPodcastShow: (String) -> Unit = {},
     onOpenYouTubeLogin: () -> Unit = {},
-
+    onReturnToHome: () -> Boolean = { false },
     mainShellViewModel: MainShellViewModel = hiltViewModel(),
 ) {
     val pagerState = rememberPagerState(pageCount = { tabs.size })
+    val feedTapEvents = remember { kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Drive the dock selection from an explicit tab index instead of
@@ -318,8 +330,21 @@ private fun MainShellContent(
     val ytConnection by mainShellViewModel.ytConnection.collectAsStateWithLifecycle()
     val settings by mainShellViewModel.settings.collectAsStateWithLifecycle(initialValue = com.lastwave.app.data.local.MiscSettings())
     var promptDismissedThisSession by rememberSaveable { mutableStateOf(false) }
+    var joinSupportDismissedThisSession by rememberSaveable { mutableStateOf(false) }
 
-    val shouldShowLoginPrompt = !ytConnection.isConnected &&
+    val shouldShowJoinSupport = !settings.hasDismissedJoinSupportPrompt && !joinSupportDismissedThisSession
+
+    if (shouldShowJoinSupport) {
+        JoinSupportDialog(
+            onDismiss = {
+                mainShellViewModel.setDismissedJoinSupportPrompt(true)
+                joinSupportDismissedThisSession = true
+            },
+        )
+    }
+
+    val shouldShowLoginPrompt = !shouldShowJoinSupport &&
+        !ytConnection.isConnected &&
         !settings.suppressYouTubeLoginPrompt &&
         !promptDismissedThisSession
 
@@ -428,6 +453,8 @@ private fun MainShellContent(
                         onOpenDownloads = onOpenDownloads,
                         onOpenPodcasts = onOpenPodcasts,
                         onOpenPodcastShow = onOpenPodcastShow,
+                        onOpenYouTubeLogin = onOpenYouTubeLogin,
+                        feedTapEvents = feedTapEvents,
                     )
                     MainTab.STATS -> HomeScreen(
                         onOpenSettings = onOpenSettings,
@@ -437,9 +464,16 @@ private fun MainShellContent(
                         onOpenFriends = onOpenFriends,
                         onOpenDownloads = onOpenDownloads,
                     )
+
                     MainTab.PLAYLISTS -> PlaylistScreen(onOpenPlaylist = onOpenPlaylist)
                     MainTab.OFFLINE -> OfflineScreen(onOpenArtist = onOpenOfflineArtist)
                     MainTab.EQUALIZER -> EqualizerScreen(onOpenSettings = onOpenSettings)
+
+                    MainTab.PLAYLISTS -> PlaylistScreen(
+                        onOpenPlaylist = onOpenPlaylist,
+                        onOpenGenerator = onOpenGenerator,
+                    )
+
                 }
             }
         }
@@ -470,60 +504,25 @@ private fun MainShellContent(
         val isMiniPlayerActive = clearance > 0.dp
         val systemBottomInset = WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
 
-        val generatorFabBottomOffset by animateDpAsState(
-            targetValue = when {
-                hideNavTabs -> {
-                    if (isMiniPlayerActive) systemBottomInset + 12.dp + 72.dp + 16.dp
-                    else systemBottomInset + 20.dp
-                }
-                md3NavBar -> { // Floating dock is active
-                    if (isMiniPlayerActive) systemBottomInset + 92.dp + 72.dp + 16.dp
-                    else systemBottomInset + 92.dp
-                }
-                else -> { // Normal tabs navigation is active
-                    if (isMiniPlayerActive) systemBottomInset + 68.dp + 72.dp + 16.dp
-                    else systemBottomInset + 56.dp + 20.dp
-                }
-            },
-            animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-            label = "generatorFabBottomOffset",
-        )
-
-        // Floating generator button on bottom-right for playlist tab in normal tabs mode or hide-nav mode
-        AnimatedVisibility(
-            visible = selectedTabIndex == tabs.indexOf(MainTab.PLAYLISTS) && (!md3NavBar || hideNavTabs),
-            enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.6f),
-            exit = fadeOut(tween(120)) + scaleOut(targetScale = 0.6f),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 20.dp, bottom = generatorFabBottomOffset)
-                .zIndex(15f),
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = liquidGlassContainerColor(MaterialTheme.colorScheme.primaryContainer, backdrop = navigationBackdrop),
-                shadowElevation = if (navGlass) 0.dp else 8.dp,
-                tonalElevation = if (navGlass) 0.dp else 4.dp,
-                modifier = Modifier
-                    .size(56.dp)
-                    .liquidGlassChrome(CircleShape, LocalLiquidGlass.current, LiquidGlassPreset.FloatingControls, navigationBackdrop)
-                    .clickable(onClick = onOpenGenerator),
-            ) {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    Icon(
-                        imageVector = Icons.Filled.AutoAwesome,
-                        contentDescription = androidx.compose.ui.res.stringResource(com.lastwave.app.R.string.nav_create_playlist),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-        }
-
         val currentSelectedIndex by androidx.compose.runtime.rememberUpdatedState(selectedTabIndex)
         val currentOnSelect by androidx.compose.runtime.rememberUpdatedState { index: Int ->
-            if (index != selectedTabIndex) selectedTabIndex = index
-            scope.launch { pagerState.animateScrollToPage(index) }
+            if (tabs[index] == MainTab.FEED) {
+                val wasOnDetail = onReturnToHome()
+                if (wasOnDetail) {
+                    if (selectedTabIndex != feedIndex) selectedTabIndex = feedIndex
+                    scope.launch { pagerState.scrollToPage(feedIndex) }
+                    return@rememberUpdatedState
+                }
+                if (pagerState.currentPage != feedIndex) {
+                    if (selectedTabIndex != feedIndex) selectedTabIndex = feedIndex
+                    scope.launch { pagerState.scrollToPage(feedIndex) }
+                    return@rememberUpdatedState
+                }
+                feedTapEvents.tryEmit(Unit)
+            } else {
+                if (index != selectedTabIndex) selectedTabIndex = index
+                scope.launch { pagerState.animateScrollToPage(index) }
+            }
             Unit
         }
         val currentOnOpenGenerator by androidx.compose.runtime.rememberUpdatedState(onOpenGenerator)
@@ -675,8 +674,7 @@ private fun FloatingNavBar(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .widthIn(max = 420.dp)
-                        .height(56.dp)
+                        .height(66.dp)
                         .selectableGroup(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
@@ -692,7 +690,7 @@ private fun FloatingNavBar(
                             label = "md3IndicatorColor_$index",
                         )
                         val indicatorWidth by animateDpAsState(
-                            targetValue = if (selected) 56.dp else 28.dp,
+                            targetValue = if (selected) 64.dp else 32.dp,
                             animationSpec = navSpring(),
                             label = "md3IndicatorWidth_$index",
                         )
@@ -713,7 +711,7 @@ private fun FloatingNavBar(
                                 .fillMaxHeight()
                                 .clickable(
                                     interactionSource = remember(index) { MutableInteractionSource() },
-                                    indication = androidx.compose.material3.ripple(bounded = false, radius = 28.dp),
+                                    indication = androidx.compose.material3.ripple(bounded = false, radius = 32.dp),
                                     onClick = onClick,
                                 ),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -721,7 +719,7 @@ private fun FloatingNavBar(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .height(28.dp)
+                                    .height(32.dp)
                                     .width(indicatorWidth)
                                     .clip(CircleShape)
                                     .background(indicatorColor),
@@ -731,13 +729,13 @@ private fun FloatingNavBar(
                                     imageVector = tab.icon(),
                                     contentDescription = null,
                                     tint = iconTint,
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier.size(24.dp),
                                 )
                             }
-                            Spacer(Modifier.height(3.dp))
+                            Spacer(Modifier.height(4.dp))
                             Text(
                                 text = androidx.compose.ui.res.stringResource(tab.labelRes),
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                                 color = labelColor,
                                 maxLines = 1,
@@ -780,6 +778,7 @@ private fun FloatingNavBar(
             ) {
                 Row(
                     modifier = Modifier
+
                         .then(
                             if (liquidGlass) {
                                 Modifier.pointerInput(Unit) {
@@ -808,12 +807,32 @@ private fun FloatingNavBar(
                                             if (here != null) lastIndex = here
                                             glassHoverIndex.value = here
                                         }
+
+                        .pointerInput(tabs, selectedIndex) {
+                            val bridge = 8.dp.toPx()
+                            val hitIndex: (Offset) -> Int? = { pos ->
+                                glassNavBounds.entries
+                                    .firstOrNull { it.value.inflate(bridge).contains(pos) }
+                                    ?.key
+                            }
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val initialHit = hitIndex(down.position)
+                                if (initialHit != null && initialHit != selectedIndex) {
+                                    onSelect(initialHit)
+                                }
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id }
+                                    if (change == null || !change.pressed) break
+                                    val currentHit = hitIndex(change.position)
+                                    if (currentHit != null && currentHit != selectedIndex) {
+                                        onSelect(currentHit)
+
                                     }
                                 }
-                            } else {
-                                Modifier
-                            },
-                        )
+                            }
+                        }
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(if (tabs.size > 4) 2.dp else 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -825,6 +844,7 @@ private fun FloatingNavBar(
                             icon = tab.icon(),
                             selected = selectedIndex == index,
                             onClick = onClick,
+
                             compact = tabs.size > 4,
                         )
                     }
@@ -876,6 +896,15 @@ private fun FloatingNavBar(
                     }
                 }
             }
+
+                            modifier = Modifier.onGloballyPositioned { coords ->
+                                glassNavBounds[index] = coords.boundsInParent()
+                            },
+                        )
+                    }
+                }
+            }
+
         }
     }
 }
@@ -886,7 +915,11 @@ private fun FloatingNavItem(
     icon: ImageVector,
     selected: Boolean,
     onClick: () -> Unit,
+
     compact: Boolean = false,
+
+    modifier: Modifier = Modifier,
+
 ) {
     val backgroundColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(
@@ -930,7 +963,11 @@ private fun FloatingNavItem(
         interactionSource = itemInteraction,
         shape = PillShape,
         color = backgroundColor,
+
         modifier = Modifier.maxxPress(itemInteraction, 0.9f).height(48.dp),
+
+        modifier = modifier.height(48.dp),
+
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -982,4 +1019,240 @@ private fun MainTab.icon(): ImageVector = when (this) {
     MainTab.PLAYLISTS -> Icons.AutoMirrored.Filled.QueueMusic
     MainTab.OFFLINE -> Icons.Filled.LibraryMusic
     MainTab.EQUALIZER -> Icons.Filled.Tune
+}
+
+@Composable
+private fun JoinSupportDialog(
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
+        containerColor = if (LocalLiquidGlass.current) {
+            MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.90f)
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Headphones,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+                    Column {
+                        Text(
+                            text = "Join Support",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "Connect with us",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "Get real-time assistance, report bugs, discover new releases, and connect directly with the developer community.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Spacer(Modifier.height(4.dp))
+
+                // Above (Top): ClashProjects Support
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .clickable {
+                            openTelegramSupport(context)
+                        },
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(18.dp),
+                    tonalElevation = 2.dp,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF24A1DE).copy(alpha = 0.18f),
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Telegram Support",
+                                    tint = Color(0xFF24A1DE),
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "ClashProjects Support",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Join @clashprojects on Telegram",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+
+                // Downside (Bottom): LastWave Discord
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .clickable {
+                            openDiscordSupport(context)
+                        },
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(18.dp),
+                    tonalElevation = 2.dp,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF5865F2).copy(alpha = 0.18f),
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Filled.Group,
+                                    contentDescription = "Discord Support",
+                                    tint = Color(0xFF5865F2),
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "LastWave Discord",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Join community & talk to developers",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            ) {
+                Text(
+                    text = "Quit",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        },
+    )
+}
+
+private fun openTelegramSupport(context: android.content.Context) {
+    val tgIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("tg://resolve?domain=clashprojects")).apply {
+        setPackage("org.telegram.messenger")
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val genericTgIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("tg://resolve?domain=clashprojects")).apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val webIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/clashprojects")).apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val success = runCatching { context.startActivity(tgIntent); true }.getOrDefault(false) ||
+        runCatching { context.startActivity(genericTgIntent); true }.getOrDefault(false) ||
+        runCatching { context.startActivity(webIntent); true }.getOrDefault(false)
+    if (!success) {
+        android.widget.Toast.makeText(context, "No browser or Telegram app available", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun openDiscordSupport(context: android.content.Context) {
+    val discordIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://discord.gg/DmyM2p2fMe")).apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val success = runCatching { context.startActivity(discordIntent); true }.getOrDefault(false)
+    if (!success) {
+        android.widget.Toast.makeText(context, "No browser available to open link", android.widget.Toast.LENGTH_SHORT).show()
+    }
 }

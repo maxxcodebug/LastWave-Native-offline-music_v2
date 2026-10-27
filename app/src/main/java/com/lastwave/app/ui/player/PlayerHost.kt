@@ -2,6 +2,7 @@
 
 package com.lastwave.app.ui.player
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import android.content.Context
@@ -99,8 +100,12 @@ import com.lastwave.app.ui.common.adaptiveContentWidth
 import com.lastwave.app.ui.common.isTabletOrWideScreen
 import com.lastwave.app.ui.theme.LocalMd3NavBar
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -140,15 +145,20 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -158,6 +168,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.SuggestionChipDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -245,6 +256,7 @@ import com.lastwave.app.data.playlist.SavedPlaylist
 import com.lastwave.app.data.playlist.LIKED_SONGS_MODE
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.MusicPlayerState
+import com.lastwave.app.playback.AutoMixState
 import com.lastwave.app.playback.PlaybackChromeState
 import com.lastwave.app.playback.formatSampleRateKHz
 import com.lastwave.app.playback.isSpatialAudioCodec
@@ -503,10 +515,16 @@ class PlayerViewModel @Inject constructor(
 
     private suspend fun refreshCustomPlaylists() {
         try {
-            _customPlaylists.value = (playlistRepository.getAll()
+            val local = playlistRepository.getAll()
                 .filter { it.mode == "custom" || it.mode == LIKED_SONGS_MODE }
-                .sortedByDescending { it.mode == LIKED_SONGS_MODE } + ytMusicLibraryManager.playlists.value)
-                .distinctBy { it.id }
+                .sortedByDescending { it.mode == LIKED_SONGS_MODE }
+            val remote = ytMusicLibraryManager.playlists.value.filterNot { r ->
+                local.any { l ->
+                    (l.remotePlaylistId != null && l.remotePlaylistId == r.remotePlaylistId) ||
+                    l.title.equals(r.title, ignoreCase = true)
+                }
+            }
+            _customPlaylists.value = (local + remote).distinctBy { it.id }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -862,7 +880,7 @@ fun PlayerHost(
             }
         }
     }
-    val miniPlayerVisible = state.current != null && !expanded
+    val miniPlayerVisible = state.current != null && !expanded && !settings.buttonNowPlayingEnabled
 
     // Sibling pattern: ONE backdrop capturing feed content,
     // consumed by the sibling MiniPlayer. Unconditional remember keeps composition stable.
@@ -882,7 +900,7 @@ fun PlayerHost(
     CompositionLocalProvider(
         LocalMusicPlayer provides viewModel.player,
         LocalAddToPlaylist provides requestAddToPlaylist,
-        LocalMiniPlayerScrollClearance provides if (state.current != null) 88.dp else 0.dp,
+        LocalMiniPlayerScrollClearance provides if (state.current != null && !settings.buttonNowPlayingEnabled) 98.dp else 0.dp,
         LocalBottomNavSlot provides bottomNavSlot,
     ) {
         Box(Modifier.fillMaxSize()) {
@@ -899,9 +917,9 @@ fun PlayerHost(
                     onNext = viewModel.player::next,
                     onClose = viewModel.player::stopAndClear,
                     bottomPadding = if (hasBottomNavigation) {
-                        if (LocalMd3NavBar.current) 68.dp else 92.dp
+                        if (LocalMd3NavBar.current) 84.dp else 80.dp
                     } else {
-                        12.dp
+                        14.dp
                     },
                     edgeToEdge = !hasBottomNavigation,
                     backdrop = if (miniGlass) miniBackdrop else null,
@@ -916,6 +934,15 @@ fun PlayerHost(
                         onCloseTimer = { viewModel.player.setSleepTimerMinutes(0) },
                     )
                 }
+            }
+            val currentTrack = state.current
+            if (currentTrack != null && !expanded && settings.buttonNowPlayingEnabled) {
+                DraggableNowPlayingButton(
+                    track = currentTrack,
+                    progressState = viewModel.progressState,
+                    isPlaying = state.isPlaying,
+                    onExpand = { expanded = true },
+                )
             }
             if (activeDownloads.isNotEmpty() && !expanded) {
                 val latestProgress = activeDownloads.firstOrNull()?.progressPercent ?: 0
@@ -1303,19 +1330,19 @@ private fun MiniPlayer(
                 shadowElevation = 6.dp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(64.dp)
+                    .height(72.dp)
                     .clickable(interactionSource = barInteraction, indication = null, onClick = onExpand),
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(start = 8.dp, end = 12.dp),
+                        .padding(start = 10.dp, end = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // Concentric Left Geometry: 48.dp artwork nesting inside the 64.dp capsule curve (8.dp vertical/start padding)
+                    // Concentric Left Geometry: 54.dp artwork nesting inside the 72.dp capsule curve
                     Box(
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(54.dp)
                             .clip(RoundedCornerShape(percent = m3ArtworkCornerPercent))
                             .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                         contentAlignment = Alignment.Center,
@@ -1354,47 +1381,40 @@ private fun MiniPlayer(
                         )
                     }
 
-                    // 44.dp CircularProgressIndicator wrapped concentrically around 36.dp Play/Pause morphing container
-                    Box(
-                        modifier = Modifier.size(44.dp),
-                        contentAlignment = Alignment.Center,
+                    // Clean solid play/pause button without outer progress indicator
+                    Surface(
+                        onClick = onToggle,
+                        shape = RoundedCornerShape(percent = m3PlayPauseCornerPercent),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.size(42.dp),
                     ) {
-                        CircularProgressIndicator(
-                            progress = { currentProgress },
-                            modifier = Modifier.size(44.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f),
-                            strokeWidth = 2.5.dp,
-                            strokeCap = StrokeCap.Round,
-                        )
-                        Surface(
-                            onClick = onToggle,
-                            shape = RoundedCornerShape(percent = m3PlayPauseCornerPercent),
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.size(36.dp),
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                if (state.isBuffering) {
-                                    ExpressiveInlineLoadingIndicator(
-                                        size = 18.dp,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        strokeWidth = 2.dp,
-                                    )
-                                } else {
-                                    AnimatedPlayPauseIcon(state.isPlaying, Modifier.size(20.dp))
-                                }
+                        Box(contentAlignment = Alignment.Center) {
+                            if (state.isBuffering) {
+                                ExpressiveInlineLoadingIndicator(
+                                    size = 20.dp,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                AnimatedPlayPauseIcon(state.isPlaying, Modifier.size(22.dp))
                             }
                         }
                     }
 
-                    // Clean, uncontained Skip Next IconButton (no dark circular background)
+                    // Skip Next IconButton with an outline stroke
                     IconButton(
                         onClick = onNext,
                         enabled = state.queueSize > 1,
                         modifier = Modifier
-                            .padding(start = 2.dp)
-                            .size(36.dp),
+                            .padding(start = 6.dp)
+                            .size(40.dp)
+                            .border(
+                                width = 1.2.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+                                shape = CircleShape,
+                            )
+                            .clip(CircleShape),
                     ) {
                         Icon(
                             Icons.Filled.SkipNext,
@@ -3020,16 +3040,37 @@ private fun FullPlayer(
                                                         alpha = sleeveAlpha
                                                     },
                                             ) {
+                                                val heroArtworkTrack = if (state.isAutoDJActive && state.autoDJSeedTrack != null) state.autoDJSeedTrack else track
                                                 Box(Modifier.fillMaxSize()) {
                                                     PlayerArtwork(
-                                                        track = track,
-                                                        modifier = Modifier.fillMaxSize(),
+                                                        track = heroArtworkTrack,
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .graphicsLayer {
+                                                                alpha = if (state.isAutoMixActive && state.autoMixNextTrack != null && !state.isAutoDJActive) {
+                                                                    (1f - state.autoMixProgress).coerceIn(0f, 1f)
+                                                                } else 1f
+                                                            },
                                                         corner = 22.dp,
                                                         canvas = if (showSleeveCanvas) canvas else null,
                                                         isPlaying = state.isPlaying,
                                                         pausedForTransition = shownDismissY > 1f || currentTab != FullPlayerTab.NOW_PLAYING,
                                                         onAspectRatioChanged = { canvasAspect = it },
                                                     )
+                                                    if (state.isAutoMixActive && state.autoMixNextTrack != null && !state.isAutoDJActive) {
+                                                        PlayerArtwork(
+                                                            track = state.autoMixNextTrack,
+                                                            modifier = Modifier
+                                                                .fillMaxSize()
+                                                                .graphicsLayer {
+                                                                    alpha = state.autoMixProgress.coerceIn(0f, 1f)
+                                                                },
+                                                            corner = 22.dp,
+                                                            canvas = null,
+                                                            isPlaying = state.isPlaying,
+                                                            pausedForTransition = shownDismissY > 1f || currentTab != FullPlayerTab.NOW_PLAYING,
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -3281,16 +3322,21 @@ private fun FullPlayer(
                                         secondaryColor = ambientCompanion,
                                         tertiaryColor = ambientDeep,
                                     )
-                                    Spacer(Modifier.height(10.dp))
-                                    MainControls(state, player, isTranslucent = LocalLiquidGlass.current || showFullBleed)
-                                    Spacer(Modifier.height(10.dp))
+                                    Spacer(Modifier.height(2.dp))
                                     AppleMusicQualityBadge(
                                         state = state,
                                         signalPath = signalPath,
                                         isTranslucent = LocalLiquidGlass.current || showFullBleed,
                                         onClick = { showSignalPath = true },
                                     )
-                                    Spacer(Modifier.height(12.dp))
+                                    NowPlayingAutoDJBadgeRow(
+                                        state = state,
+                                        onClick = { showAudioControls = true },
+                                        isTranslucent = LocalLiquidGlass.current || showFullBleed,
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    MainControls(state, player, isTranslucent = LocalLiquidGlass.current || showFullBleed)
+                                    Spacer(Modifier.height(22.dp))
                                     PlayerUtilityControls(
                                         state = state,
                                         player = player,
@@ -3594,13 +3640,33 @@ private fun FullPlayerLandscape(
                 Box(Modifier.fillMaxSize()) {
                     PlayerArtwork(
                         track = track,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                alpha = if (state.isAutoMixActive && state.autoMixNextTrack != null) {
+                                    (1f - state.autoMixProgress).coerceIn(0f, 1f)
+                                } else 1f
+                            },
                         corner = 24.dp,
                         canvas = if (showSleeveCanvas) canvas else null,
                         isPlaying = state.isPlaying,
                         pausedForTransition = shownDismissY > 1f,
                         onAspectRatioChanged = { canvasAspect = it },
                     )
+                    if (state.isAutoMixActive && state.autoMixNextTrack != null) {
+                        PlayerArtwork(
+                            track = state.autoMixNextTrack,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    alpha = state.autoMixProgress.coerceIn(0f, 1f)
+                                },
+                            corner = 24.dp,
+                            canvas = null,
+                            isPlaying = state.isPlaying,
+                            pausedForTransition = shownDismissY > 1f,
+                        )
+                    }
                 }
             }
 
@@ -3857,11 +3923,7 @@ private fun FullPlayerLandscape(
                 tertiaryColor = ambientDeep,
             )
 
-            Spacer(Modifier.height(14.dp))
-
-            MainControls(state, player, isTranslucent = LocalLiquidGlass.current)
-
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(2.dp))
 
             val signalPath by player.signalPath.collectAsStateWithLifecycle()
             AppleMusicQualityBadge(
@@ -3870,8 +3932,16 @@ private fun FullPlayerLandscape(
                 isTranslucent = LocalLiquidGlass.current,
                 onClick = onOpenSignalPath,
             )
+            NowPlayingAutoDJBadgeRow(
+                state = state,
+                onClick = onOpenAudioControls,
+                isTranslucent = LocalLiquidGlass.current,
+            )
+            Spacer(Modifier.height(10.dp))
 
-            Spacer(Modifier.height(14.dp))
+            MainControls(state, player, isTranslucent = LocalLiquidGlass.current)
+
+            Spacer(Modifier.height(22.dp))
 
             PlayerUtilityControls(
                 state = state,
@@ -4412,10 +4482,10 @@ private fun PlayerUtilityControls(
             iconSize = if (isTranslucent) 19.dp else 20.dp,
             modifier = Modifier.weight(1f).height(if (isTranslucent) 44.dp else 48.dp),
         )
-        val isCustomAudio = state.speed != 1f || state.pitch != 1f
+        val isCustomAudio = state.speed != 1f || state.pitch != 1f || state.isAutoMixActive || state.autoMixState == AutoMixState.MONITORING_OUTRO
         PlayerModeButton(
             active = isCustomAudio,
-            description = if (isCustomAudio) "Audio Controls (Active)" else "Audio & Studio Controls",
+            description = if (isCustomAudio) "Audio Controls (DJ / Mix Active)" else "Audio & Studio Controls",
             icon = Icons.Filled.VolumeUp,
             onClick = onOpenAudioControls,
             background = edgeButtonBackground,
@@ -4439,6 +4509,796 @@ private fun PlayerUtilityControls(
         )
     }
 }
+
+@Composable
+private fun NowPlayingAutoDJBadgeRow(
+    state: MusicPlayerState,
+    onClick: () -> Unit,
+    isTranslucent: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    // Keep generation and loading strictly in background & speaker tray console
+    if (state.isAutoDJGenerating) return
+
+    val isBlending = state.isAutoMixActive || state.autoMixState == AutoMixState.FADING_AUTO || state.autoMixState == AutoMixState.FADING_FAST
+    val isAutoDJMix = state.isAutoDJMixPlaying
+    val isArmed = state.autoMixState == AutoMixState.MONITORING_OUTRO
+
+    // Only show badge when something musical is actively occurring:
+    // 1. AutoDJ megamix is actively playing
+    // 2. Dual deck blend/transition is currently fading
+    // 3. Automix outro is armed near the very end of track
+    if (!isAutoDJMix && !isBlending && !isArmed) return
+
+    val infiniteTransition = rememberInfiniteTransition(label = "automix_glow")
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.30f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1100, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glowAlpha"
+    )
+
+    val bars = state.autoMixBars ?: 8
+    val curIdx = state.autoDJSetCurrentIndex ?: 1
+    val totalTracks = state.autoDJSetTotalTracks ?: 6
+    val (badgeText, badgeBg, badgeFg) = when {
+        isBlending && isAutoDJMix -> Triple(
+            "AutoDJ Mix · Track $curIdx of $totalTracks (Blending into ${state.autoMixNextTrack?.title ?: "Next"})",
+            Color(0xFF8B5CF6).copy(alpha = if (isTranslucent) 0.35f else 0.22f),
+            Color(0xFFDDD6FE)
+        )
+        isBlending -> Triple(
+            "Automix · $bars-Bar Bass Swap [BPM Synced]",
+            Color(0xFF8B5CF6).copy(alpha = if (isTranslucent) 0.35f else 0.22f),
+            Color(0xFFDDD6FE)
+        )
+        isAutoDJMix -> Triple(
+            "AutoDJ ~5-Min Mix · Track $curIdx of $totalTracks",
+            Color(0xFF06B6D4).copy(alpha = if (isTranslucent) 0.35f else 0.20f),
+            Color(0xFF67E8F9)
+        )
+        isArmed -> Triple(
+            "Automix · Outro Armed",
+            Color(0xFF10B981).copy(alpha = if (isTranslucent) 0.35f else 0.20f),
+            Color(0xFFA7F3D0)
+        )
+        else -> return
+    }
+
+    val glowBorderModifier = if (isBlending) {
+        Modifier.border(
+            width = 1.2.dp,
+            brush = Brush.horizontalGradient(
+                listOf(
+                    Color(0xFFA78BFA).copy(alpha = glowAlpha),
+                    Color(0xFFEC4899).copy(alpha = glowAlpha),
+                    Color(0xFFA78BFA).copy(alpha = glowAlpha),
+                )
+            ),
+            shape = RoundedCornerShape(50)
+        )
+    } else Modifier
+
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = badgeBg,
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .then(glowBorderModifier)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.AutoAwesome,
+                contentDescription = null,
+                tint = badgeFg,
+                modifier = Modifier.size(13.dp),
+            )
+            Text(
+                text = badgeText,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.4.sp,
+                ),
+                color = badgeFg,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeckWaveform(
+    deckLabel: String,
+    channelColor: Color,
+    secondaryColor: Color,
+    trackTitle: String,
+    trackArtist: String,
+    isPlaying: Boolean,
+    isBlending: Boolean,
+    progress: Float,
+    isDeckA: Boolean,
+    phase: Float,
+    cueMs: Long? = null,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.45f),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            // Deck Channel Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = channelColor.copy(alpha = 0.22f),
+                    ) {
+                        Text(
+                            text = deckLabel,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.5.sp,
+                            ),
+                            color = channelColor,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                    Text(
+                        text = if (trackTitle.isNotBlank()) "$trackTitle • $trackArtist" else "Standby Deck Empty",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                if (isDeckA && isBlending && progress >= 0.65f) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFFDDD6FE).copy(alpha = 0.25f),
+                    ) {
+                        Text(
+                            text = "ECHO FREEZE TAIL",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color(0xFFDDD6FE),
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        )
+                    }
+                } else if (!isDeckA && (cueMs ?: 0L) in 100L..15000L) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFFFDE68A).copy(alpha = 0.25f),
+                    ) {
+                        Text(
+                            text = "KICK CUE +${cueMs}ms",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color(0xFFFDE68A),
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        )
+                    }
+                }
+            }
+
+            // Real-time Canvas Waveform: 24 animated frequency spectrum bars + continuous curve
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.25f)),
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val barCount = 24
+                    val spacing = 3.dp.toPx()
+                    val barWidth = ((w - spacing * (barCount + 1)) / barCount).coerceAtLeast(2f)
+
+                    val wavePath = androidx.compose.ui.graphics.Path()
+                    val echoPath = if (isDeckA && isBlending && progress >= 0.65f) androidx.compose.ui.graphics.Path() else null
+
+                    for (i in 0 until barCount) {
+                        val norm = i.toFloat() / (barCount - 1).toFloat()
+                        // Wave physics: bass harmonic + mid harmonic + treble shimmer
+                        val bassHarmonic = sin((phase * 2f + norm * 3.14159f).toDouble()).toFloat()
+                        val trebleHarmonic = cos((phase * 3.5f + norm * 6.28318f).toDouble()).toFloat() * 0.4f
+                        var barAmp = (0.45f + 0.35f * bassHarmonic + 0.20f * trebleHarmonic).coerceIn(0.08f, 1.0f)
+
+                        if (!isPlaying) {
+                            barAmp *= 0.15f
+                        } else if (isDeckA) {
+                            if (isBlending) {
+                                // HPF sweeps 30Hz -> 900Hz: lower bars get attenuated
+                                val hpfCutoffNorm = (progress * 0.45f).coerceIn(0f, 0.45f)
+                                if (norm < hpfCutoffNorm) {
+                                    barAmp *= (norm / hpfCutoffNorm.coerceAtLeast(0.01f)).coerceIn(0.1f, 1f)
+                                }
+                                // Midpoint downbeat bass-swap: attenuate bass (norm < 0.25) by -18dB (0.125f)
+                                if (norm < 0.25f && progress >= 0.50f) {
+                                    barAmp *= 0.125f
+                                }
+                                // Overall volume attenuation as transition progresses
+                                barAmp *= (1f - progress * 0.70f).coerceAtLeast(0.05f)
+                            }
+                        } else {
+                            // Deck B
+                            if (!isBlending) {
+                                // Standby prebuffer: subtle pulse
+                                barAmp *= 0.30f
+                            } else {
+                                // LPF opens 1200Hz -> 20000Hz over first 40%
+                                val lpfOpenNorm = if (progress <= 0.40f) (0.25f + (progress / 0.40f) * 0.75f) else 1.0f
+                                if (norm > lpfOpenNorm) {
+                                    barAmp *= (1.0f - (norm - lpfOpenNorm) * 2f).coerceIn(0.05f, 1f)
+                                }
+                                // Midpoint downbeat bass-swap: duck bass by -18dB until 0.50, then snap to 0dB punch!
+                                if (norm < 0.25f) {
+                                    if (progress < 0.50f) {
+                                        barAmp *= 0.125f
+                                    } else {
+                                        barAmp *= 1.25f
+                                    }
+                                }
+                                barAmp *= (0.30f + progress * 0.70f).coerceIn(0.1f, 1.0f)
+                            }
+                        }
+
+                        val barHeight = (barAmp * (h - 8.dp.toPx())).coerceAtLeast(3.dp.toPx())
+                        val x = spacing + i * (barWidth + spacing)
+                        val y = h - barHeight - 4.dp.toPx()
+
+                        // Draw bar with gradient
+                        drawRoundRect(
+                            brush = Brush.verticalGradient(
+                                colors = listOf(secondaryColor, channelColor),
+                                startY = y,
+                                endY = h,
+                            ),
+                            topLeft = Offset(x, y),
+                            size = Size(barWidth, barHeight),
+                            cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f),
+                        )
+
+                        // Build continuous wave curve
+                        val peakX = x + barWidth / 2f
+                        if (i == 0) {
+                            wavePath.moveTo(peakX, y)
+                        } else {
+                            wavePath.lineTo(peakX, y)
+                        }
+
+                        // Build echo freeze envelope
+                        if (echoPath != null) {
+                            val echoY = y - 4.dp.toPx() * (1f - norm)
+                            if (i == 0) echoPath.moveTo(peakX, echoY) else echoPath.lineTo(peakX, echoY)
+                        }
+                    }
+
+                    // Stroke wave curve
+                    drawPath(
+                        path = wavePath,
+                        color = secondaryColor.copy(alpha = 0.85f),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 2.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        ),
+                    )
+
+                    // Schroeder Echo Freeze shimmer tail
+                    if (echoPath != null) {
+                        val echoAlpha = (0.55f * ((progress - 0.65f) / 0.35f)).coerceIn(0f, 0.60f)
+                        drawPath(
+                            path = echoPath,
+                            color = Color(0xFFDDD6FE).copy(alpha = echoAlpha),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                width = 3.5.dp.toPx(),
+                                cap = StrokeCap.Round,
+                            ),
+                        )
+                    }
+
+                    // Draw kick cue marker on Deck B
+                    if (!isDeckA && (cueMs ?: 0L) in 100L..15000L) {
+                        val cueFraction = ((cueMs!!.toFloat()) / 15000f).coerceIn(0.05f, 0.95f)
+                        val markerX = cueFraction * w
+                        drawLine(
+                            color = Color(0xFFFDE68A),
+                            start = Offset(markerX, 0f),
+                            end = Offset(markerX, h),
+                            strokeWidth = 2.dp.toPx(),
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                }
+            }
+
+            // DSP Telemetry Badges Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isDeckA) {
+                    val hpfHz = if (isBlending) {
+                        (30.0 * Math.pow(30.0, progress.toDouble())).roundToInt()
+                    } else 30
+                    Text(
+                        text = "HPF: ${hpfHz}Hz (Q=1.35)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = if (isBlending && progress >= 0.50f) "Bass: -18dB Cut" else "Bass: 0dB Unity",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isBlending && progress >= 0.50f) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = if (isBlending && progress >= 0.50f) FontWeight.Bold else FontWeight.Normal,
+                    )
+                    Text(
+                        text = if (isBlending && progress >= 0.65f) "Tail: 55% Freeze" else "Tail: Dry",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isBlending && progress >= 0.65f) Color(0xFFC084FC) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = if (isBlending && progress >= 0.65f) FontWeight.Bold else FontWeight.Normal,
+                    )
+                } else {
+                    val lpfHz = if (isBlending) {
+                        if (progress <= 0.40f) {
+                            (1200.0 * Math.pow(20000.0 / 1200.0, (progress / 0.40).toDouble())).roundToInt()
+                        } else 20000
+                    } else 20000
+                    Text(
+                        text = if (isBlending && progress <= 0.40f) "LPF: ${lpfHz}Hz" else "LPF: 20kHz Open",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = if (isBlending) (if (progress < 0.50f) "Bass: -18dB Duck" else "Bass: 0dB Punch!") else "Bass: Ducked",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isBlending && progress >= 0.50f) Color(0xFF34D399) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = if (isBlending && progress >= 0.50f) FontWeight.Bold else FontWeight.Normal,
+                    )
+                    Text(
+                        text = if ((cueMs ?: 0L) > 0L) "Cue: +${cueMs}ms" else "Cue: Beat 1",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFDE68A),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutoDJStudioConsoleCard(
+    state: MusicPlayerState,
+    player: MusicPlayer,
+    modifier: Modifier = Modifier,
+) {
+    val haptics = LocalHapticFeedback.current
+    val isBlending = state.isAutoMixActive || state.autoMixState == AutoMixState.FADING_AUTO || state.autoMixState == AutoMixState.FADING_FAST
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        // 1. Standalone Automix Outro Blending Card
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.20f)),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (state.isAutoMixEnabled) Color(0xFF8B5CF6).copy(alpha = 0.25f)
+                                else MaterialTheme.colorScheme.surfaceContainerHighest
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            tint = if (state.isAutoMixEnabled) Color(0xFFDDD6FE) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Automix Outro Blending",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "Seamless 16-bar bass-swap at the end of normal tracks",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Switch(
+                    checked = state.isAutoMixEnabled,
+                    onCheckedChange = {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        player.setAutomixEnabled(it)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Color(0xFF8B5CF6),
+                    ),
+                )
+            }
+        }
+
+        // 2. Standalone AutoDJ Megamix (~5 min) Card
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.20f)),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                // Header: Title + Feature Badges + Live Status Pill
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (state.isAutoDJMixPlaying) Color(0xFF06B6D4).copy(alpha = 0.25f)
+                                    else if (state.isAutoDJGenerating) Color(0xFFF59E0B).copy(alpha = 0.25f)
+                                    else MaterialTheme.colorScheme.primaryContainer
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.QueueMusic,
+                                contentDescription = null,
+                                tint = if (state.isAutoDJMixPlaying) Color(0xFF67E8F9)
+                                    else if (state.isAutoDJGenerating) Color(0xFFFDE68A)
+                                    else MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "AutoDJ Megamix (~5 min)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = if (state.isAutoDJMixPlaying) "Now Playing Single Combined Mix"
+                                else if (state.isAutoDJGenerating) "Resolving 5–6 queue tracks in background..."
+                                else "Blends 5–6 queue tracks into a continuous DJ mix",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    // Mode Pill
+                    val (pillText, pillBg, pillFg) = when {
+                        state.isAutoDJMixPlaying -> Triple("MEGAMIX LIVE", Color(0xFF06B6D4).copy(alpha = 0.25f), Color(0xFF67E8F9))
+                        state.isAutoDJGenerating -> Triple("RESOLVING", Color(0xFFF59E0B).copy(alpha = 0.25f), Color(0xFFFDE68A))
+                        else -> Triple("READY", MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = pillBg,
+                    ) {
+                        Text(
+                            text = pillText,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 0.5.sp),
+                            color = pillFg,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+
+                // Feature Badges Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    ) {
+                        Text(
+                            text = "⏱ ~5 MIN TOTAL",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 10.sp),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    ) {
+                        Text(
+                            text = "🎚 5–6 BALANCED TRACKS",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 10.sp),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (state.isAutoMixEnabled) Color(0xFF8B5CF6).copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    ) {
+                        Text(
+                            text = if (state.isAutoMixEnabled) "⚡ AUTOMIX DSP" else "🔀 EQUAL CROSSFADE",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 10.sp),
+                            color = if (state.isAutoMixEnabled) Color(0xFFDDD6FE) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+
+                // Dynamic Action / Monitor Area
+                if (state.isAutoDJGenerating) {
+                    // Background Generating Progress
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f))
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = state.autoDJStatus ?: "Resolving 5–6 tracks in background...",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            val pct = (state.autoDJGenerationProgress * 100).toInt()
+                            Text(
+                                text = "$pct%",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color(0xFFF59E0B),
+                            )
+                        }
+                        LinearProgressIndicator(
+                            progress = { state.autoDJGenerationProgress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = Color(0xFFF59E0B),
+                            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = "Current song continues playing normally (~10s)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    player.cancelAutoDJGeneration()
+                                }
+                            ) {
+                                Text("Cancel", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                } else if (state.isAutoDJMixPlaying) {
+                    // Live Mix Now Playing Hero Card
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f))
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            val artworkUrl = state.current?.artworkUrl ?: state.autoDJSeedTrack?.artworkUrl
+                            Box(
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.Black.copy(alpha = 0.25f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                if (!artworkUrl.isNullOrBlank()) {
+                                    AsyncImage(
+                                        model = artworkUrl,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Filled.MusicNote,
+                                        contentDescription = null,
+                                        tint = Color(0xFF06B6D4),
+                                        modifier = Modifier.size(26.dp),
+                                    )
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = state.current?.title ?: "AutoDJ Megamix (~5 min)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                val curIdx = state.autoDJSetCurrentIndex ?: 1
+                                val totalTracks = state.autoDJSetTotalTracks ?: 6
+                                val segmentTitle = state.autoDJCurrentSegmentTitle
+                                Text(
+                                    text = if (!segmentTitle.isNullOrBlank()) "Track $curIdx of $totalTracks: $segmentTitle"
+                                    else "Track $curIdx of $totalTracks in continuous mix",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF06B6D4),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+
+                        if (isBlending) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color.Black.copy(alpha = 0.25f))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = if (state.isAutoMixEnabled) "AUTOMIX BASS-SWAP" else "EQUAL CROSSFADE",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black, fontSize = 9.sp),
+                                        color = Color(0xFFDDD6FE),
+                                    )
+                                    val blendPct = (state.autoMixProgress * 100).roundToInt()
+                                    Text(
+                                        text = "$blendPct% BLEND",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 9.sp),
+                                        color = Color(0xFFEC4899),
+                                    )
+                                }
+                                LinearProgressIndicator(
+                                    progress = { state.autoMixProgress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .clip(RoundedCornerShape(2.dp)),
+                                    color = Color(0xFF8B5CF6),
+                                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                player.exitAutoDJMix()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Exit AutoDJ Mix",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            )
+                        }
+                    }
+                } else {
+                    // Ready: Large, clean "⚡ Generate AutoDJ Mix" button
+                    Button(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            player.generateAndPlayAutoDJMix()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "⚡ Generate AutoDJ Mix",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -4480,24 +5340,13 @@ private fun AppleMusicQualityBadge(
         else -> MaterialTheme.colorScheme.onSurface
     }
 
-    val containerBg = if (isTranslucent) {
-        Color.White.copy(alpha = 0.12f)
-    } else {
-        MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.50f)
-    }
-
     Box(
         modifier = modifier.fillMaxWidth(),
         contentAlignment = Alignment.Center,
     ) {
-        Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = containerBg,
-            tonalElevation = 0.dp,
-            shadowElevation = 0.dp,
+        Row(
             modifier = Modifier
-                .height(30.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -4507,43 +5356,40 @@ private fun AppleMusicQualityBadge(
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         onClick()
                     },
-                ),
+                )
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Icon(
-                    imageVector = badgeIcon,
-                    contentDescription = null,
-                    tint = tintColor,
-                    modifier = Modifier.size(15.dp),
-                )
-                Spacer(Modifier.width(5.dp))
-                val fullText = if (baseLabel.isNotBlank() && !baseLabel.equals(displayTitle, ignoreCase = true) && !baseLabel.equals("AUDIO", ignoreCase = true)) {
-                    "$displayTitle · $baseLabel"
-                } else {
-                    displayTitle
-                }
-                Text(
-                    text = fullText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.4.sp,
-                    ),
-                    color = tintColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.width(3.dp))
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                    contentDescription = null,
-                    tint = tintColor.copy(alpha = 0.6f),
-                    modifier = Modifier.size(10.dp),
-                )
+            Icon(
+                imageVector = badgeIcon,
+                contentDescription = null,
+                tint = tintColor,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            val fullText = if (baseLabel.isNotBlank() && !baseLabel.equals(displayTitle, ignoreCase = true) && !baseLabel.equals("AUDIO", ignoreCase = true)) {
+                "$displayTitle · $baseLabel"
+            } else {
+                displayTitle
             }
+            Text(
+                text = fullText,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.4.sp,
+                ),
+                color = tintColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.width(3.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                contentDescription = null,
+                tint = tintColor.copy(alpha = 0.6f),
+                modifier = Modifier.size(10.dp),
+            )
         }
     }
 }
@@ -4585,7 +5431,7 @@ private fun AudioControlsSheet(
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // Header Row
+            // 1. Studio Master Header Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -4593,63 +5439,125 @@ private fun AudioControlsSheet(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(42.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFF8B5CF6), Color(0xFF06B6D4))
+                                )
+                            ),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.VolumeUp,
+                            imageVector = Icons.Filled.GraphicEq,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            tint = Color.White,
                             modifier = Modifier.size(22.dp),
                         )
                     }
                     Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "STUDIO MASTER CONSOLE",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Black,
+                                    letterSpacing = 0.8.sp,
+                                ),
+                                color = Color(0xFF8B5CF6),
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF10B981))
+                            )
+                        }
                         Text(
-                            text = "Audio & Studio Controls",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = "Volume, Slowed & Pitch Engine",
+                            text = "Dual-Deck Hardware DSP • ~5-Min Auto DJ",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Medium,
                         )
                     }
                 }
                 IconButton(onClick = onDismiss) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close")
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            // Volume Section Card
+            // 2. Master System Volume Deck
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.20f)),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(
-                        text = "System Volume",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.VolumeUp,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = "Master Output Level",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        ) {
+                            Text(
+                                text = "HARDWARE SINK",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 9.sp,
+                                    letterSpacing = 0.5.sp,
+                                ),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
                     VolumeSlider(
                         isTranslucent = false,
                         primaryColor = MaterialTheme.colorScheme.primary,
                     )
                 }
             }
+
+            // Auto DJ & Automix Live Section Card
+            AutoDJStudioConsoleCard(
+                state = state,
+                player = player,
+            )
 
             // Studio Slowed & Pitch Section Card
             Surface(
@@ -4681,38 +5589,69 @@ private fun AudioControlsSheet(
                             )
                         }
 
-                        // Lock Button Toggle
-                        FilterChip(
-                            selected = isLocked,
-                            onClick = {
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                isLocked = !isLocked
-                                if (isLocked) {
-                                    // Snap pitch to speed
-                                    currentPitch = currentSpeed
-                                    player.setPlaybackParameters(currentSpeed, currentSpeed)
-                                }
-                            },
-                            label = {
-                                Text(
-                                    if (isLocked) "Linked" else "Free",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = if (isLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp),
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            ),
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Lock Button Toggle
+                            FilterChip(
+                                selected = isLocked,
+                                onClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    isLocked = !isLocked
+                                    if (isLocked) {
+                                        // Snap pitch to speed
+                                        currentPitch = currentSpeed
+                                        player.setPlaybackParameters(currentSpeed, currentSpeed)
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        if (isLocked) "Linked" else "Free",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = if (isLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                },
+                                border = null,
+                                shape = RoundedCornerShape(16.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    iconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                ),
+                            )
+
+                            // Reset Button placed right next to Lock button
+                            androidx.compose.material3.FilledTonalButton(
+                                onClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    currentSpeed = 1.0f
+                                    currentPitch = 1.0f
+                                    player.resetPlaybackParameters()
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    contentColor = MaterialTheme.colorScheme.onSurface,
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp),
+                            ) {
+                                Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Reset", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
 
                     // Speed Slider
@@ -4807,16 +5746,19 @@ private fun AudioControlsSheet(
                         )
                     }
 
-                    // Quick Presets
+                    // Quick Presets - Material You Expressive Design without outline/stroke
                     Text(
                         text = "Studio Presets",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    FlowRow(
+                    val presetColors = SuggestionChipDefaults.suggestionChipColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        labelColor = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         SuggestionChip(
                             onClick = {
@@ -4825,7 +5767,11 @@ private fun AudioControlsSheet(
                                 currentPitch = 0.85f
                                 player.setPlaybackParameters(0.85f, 0.85f)
                             },
-                            label = { Text("Slowed (0.85x)", style = MaterialTheme.typography.labelSmall) },
+                            label = { Text("Slowed", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                            border = null,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = presetColors,
+                            modifier = Modifier.weight(1f),
                         )
                         SuggestionChip(
                             onClick = {
@@ -4834,7 +5780,11 @@ private fun AudioControlsSheet(
                                 currentPitch = 0.75f
                                 player.setPlaybackParameters(0.75f, 0.75f)
                             },
-                            label = { Text("Deep Slowed (0.75x)", style = MaterialTheme.typography.labelSmall) },
+                            label = { Text("Deep Slow", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                            border = null,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = presetColors,
+                            modifier = Modifier.weight(1f),
                         )
                         SuggestionChip(
                             onClick = {
@@ -4843,8 +5793,17 @@ private fun AudioControlsSheet(
                                 currentPitch = 1.0f
                                 player.resetPlaybackParameters()
                             },
-                            label = { Text("Normal (1.00x)", style = MaterialTheme.typography.labelSmall) },
+                            label = { Text("Normal", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                            border = null,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = presetColors,
+                            modifier = Modifier.weight(1f),
                         )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         SuggestionChip(
                             onClick = {
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -4852,7 +5811,11 @@ private fun AudioControlsSheet(
                                 currentPitch = 1.15f
                                 player.setPlaybackParameters(1.15f, 1.15f)
                             },
-                            label = { Text("Nightcore (1.15x)", style = MaterialTheme.typography.labelSmall) },
+                            label = { Text("Nightcore", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                            border = null,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = presetColors,
+                            modifier = Modifier.weight(1f),
                         )
                         SuggestionChip(
                             onClick = {
@@ -4861,26 +5824,28 @@ private fun AudioControlsSheet(
                                 currentPitch = 1.25f
                                 player.setPlaybackParameters(1.25f, 1.25f)
                             },
-                            label = { Text("Sped Up (1.25x)", style = MaterialTheme.typography.labelSmall) },
+                            label = { Text("Sped Up", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                            border = null,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = presetColors,
+                            modifier = Modifier.weight(1f),
                         )
-                    }
-
-                    // Reset Button (visible when not 1.0x)
-                    if (currentSpeed != 1.0f || currentPitch != 1.0f) {
-                        OutlinedButton(
+                        SuggestionChip(
                             onClick = {
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                currentSpeed = 1.0f
-                                currentPitch = 1.0f
-                                player.resetPlaybackParameters()
+                                currentSpeed = 0.80f
+                                currentPitch = 0.70f
+                                player.setPlaybackParameters(0.80f, 0.70f)
                             },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                        ) {
-                            Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Reset Speed & Pitch to Normal")
-                        }
+                            label = { Text("Vaporwave", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                            border = null,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = SuggestionChipDefaults.suggestionChipColors(
+                                containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f),
+                                labelColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                 }
             }
@@ -5065,6 +6030,8 @@ private fun QueuePanel(state: MusicPlayerState, player: MusicPlayer, modifier: M
                             textAlign = TextAlign.Center,
                             modifier = Modifier.width(20.dp),
                         )
+                        Spacer(Modifier.width(6.dp))
+                        PlayerArtwork(item, Modifier.size(36.dp), 8.dp)
                         Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
                             Text(
                                 item.title,
