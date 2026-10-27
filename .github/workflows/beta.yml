@@ -3,8 +3,6 @@ name: Build LastWave Beta APK
 on:
   push:
     branches: [ beta ]
-  pull_request:
-    branches: [ beta ]
   workflow_dispatch:
 
 jobs:
@@ -83,3 +81,26 @@ jobs:
           name: LastWave-v${{ steps.prep_apk.outputs.version }}-Beta-APKs
           path: final_apk/*.apk
           if-no-files-found: error
+
+      - name: Confirm APK files exist
+        run: |
+          test -n "$(find final_apk -maxdepth 1 -name '*.apk' -print -quit)" || {
+            echo "::error::No APK files found; refusing to publish"; exit 1;
+          }
+
+      - name: Publish Beta GitHub Pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.prep_apk.outputs.version }}-beta.${{ github.run_number }}
+          name: LastWave Beta Channel v${{ steps.prep_apk.outputs.version }} (Build ${{ github.run_number }})
+          body: |
+            ## LastWave Beta Channel by Anshuman X
+
+            **Beta testing warning:** This build may contain bugs, crashes, unfinished features, or data-loss risks. Back up important data before installing. Beta releases are less thoroughly tested than Stable releases.
+
+            Commit: ${{ github.sha }}
+          files: final_apk/*.apk
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
